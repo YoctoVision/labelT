@@ -2,9 +2,13 @@ import gc
 import os
 import platform
 import sys
+import signal
 import random
 import traceback
+import yaml
 from pathlib import Path
+
+from PyQt5 import QtCore, QtGui
 
 import torch
 from PIL import Image, ImageDraw, ImageFont
@@ -14,7 +18,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QFileDialog, QVBoxLayout, QHBoxLayout,
     QWidget, QLabel, QPushButton, QListWidget, QScrollArea, QGroupBox,
     QListWidgetItem, QMessageBox, QCheckBox, QProgressBar,
-    QFrame, QComboBox, QDialog, QLineEdit,
+    QFrame, QComboBox, QDialog, QLineEdit, QDesktopWidget,
     QGridLayout, QTabWidget, QTreeView,
     QFileSystemModel, QStatusBar, QToolBar, QAction, QDockWidget, QMenu
 )
@@ -23,58 +27,41 @@ from PyQt5.QtGui import QPixmap, QImage, QFont, QIntValidator, QIcon
 
 from support import ClickableLabel, FullScreenImageDialog, ImageProcessingThread, DarkTheme
 
+from utils import get_dominant_color, get_contrast_color, get_label_txt
+
 
 class IDEMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        # Platform-specific initialization
+        # 平台特定初始化
         self._init_platform_settings()
 
-        # Window setup
-        self.setWindowTitle("YOLO Vision Labeler IDE")
-        self.setGeometry(100, 100, 1200, 800)
+        # 窗口设置
+        self.setWindowTitle("YOLO视觉标注器IDE")
+        self.set_window_geometry_by_ratio(width_ratio=0.75, height_ratio=0.8)
 
-        # Initialize instance variables
+        # 初始化实例变量
         self._initialize_variables()
 
-        # UI setup
+        # 界面设置
         self.init_ui()
         self.setup_connections()
 
-    def _init_platform_settings(self):
-        """Initialize platform-specific settings"""
-        self.os_name = platform.system()
 
-        # Windows specific
-        if self.os_name == "Windows":
-            try:
-                import ctypes
-                # Set app ID for Windows taskbar
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('yolo.vision.labeler.ide')
-            except:
-                pass
-            # Enable high DPI scaling
-            QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-            QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
-        # macOS specific
-        elif self.os_name == "Darwin":
-            # Enable retina display support
-            self.setAttribute(Qt.WA_TranslucentBackground)
-            self.setAttribute(Qt.WA_NoSystemBackground, False)
-            # Enable unified toolbar style
-            self.setUnifiedTitleAndToolBarOnMac(True)
-
-        # Linux specific
-        elif self.os_name == "Linux":
-            # Additional Linux-specific settings if needed
-            pass
+    def set_window_geometry_by_ratio(self, width_ratio=0.75, height_ratio=0.8):
+        """按屏幕比例设置窗口几何"""
+        screen = QDesktopWidget().screenGeometry()
+        width = int(screen.width() * width_ratio)
+        height = int(screen.height() * height_ratio)
+        x = (screen.width() - width) // 2  # 水平居中
+        y = (screen.height() - height) // 2  # 垂直居中
+        self.setGeometry(x, y, width, height)
 
     # --------------------------
-    # Initialization Methods
+    # 初始化方法
     # --------------------------
     def _initialize_variables(self):
-        """Initialize all instance variables"""
+        """初始化所有实例变量"""
         self.image_folder = ""
         self.yolo_model = ""
         self.yolo_model_pt = None
@@ -87,30 +74,31 @@ class IDEMainWindow(QMainWindow):
         self.processing_thread = None
         self.yolo_labels = {}
         self.label_colors = {}
+        self.all_label_colors = {}
         self.current_image_index = -1
-        self.images_per_page = 30  # Количество изображений для начальной загрузки
-        self.load_batch_size = 20  # Сколько изображений подгружать при скролле
-        self.current_loaded = 0    # Сколько изображений уже загружено
+        self.images_per_page = 30  # 初始加载的图像数量
+        self.load_batch_size = 20  # 滚动时加载的图像数量
+        self.current_loaded = 0    # 已加载的图像数量
         self.current_page = 0
         self.is_loading = False
-        self.scroll_connection = None  # Для хранения соединения сигнала скролла
+        self.scroll_connection = None  # 用于存储滚动信号的连接
 
     def init_ui(self):
-        """Initialize all UI components"""
-        # Устанавливаем центральный виджет (для отображения кластеров)
+        """初始化所有界面组件"""
+        # 设置中心显示区域（用于显示聚类）
         self._create_central_display_area()
 
-        # Create UI components
+        # 创建界面组件
         self.create_toolbar()
         self.create_status_bar()
         self.create_dock_widgets()
-        self.create_main_tab_dock()  # Переименованный метод для создания dock
+        self.create_main_tab_dock()  # 创建dock的更名方法
 
         self.set_styles()
 
     def create_toolbar(self):
-        """Create the main toolbar"""
-        toolbar = QToolBar("Main Toolbar")
+        """创建主工具栏"""
+        toolbar = QToolBar("主工具栏")
         toolbar.setIconSize(QSize(16, 16))
 
         if self.os_name == "Darwin":
@@ -119,11 +107,11 @@ class IDEMainWindow(QMainWindow):
             toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
 
         actions = [
-            ("document-open", "Open Folder", self.browse_folder),
-            ("system-run", "Process Images", self.process_images),
-            None,  # Separator
-            ("applications-science", "Load YOLO Model", self.browse_yolo_model_file),
-            ("document-edit", "Auto Label", self.run_auto_labeling),
+            ("document-open", "打开文件夹", self.browse_folder),
+            ("system-run", "处理图像", self.process_images),
+            None,  # 分隔符
+            ("applications-science", "加载YOLO模型", self.browse_yolo_model_file),
+            ("document-edit", "自动标注", self.run_auto_labeling),
         ]
 
         for action in actions:
@@ -137,18 +125,18 @@ class IDEMainWindow(QMainWindow):
         self.addToolBar(toolbar)
 
     def get_normalized_path(self, path):
-        """Get platform-normalized path"""
+        """获取平台规范化的路径"""
         return Path(path).as_posix() if self.os_name != "Windows" else os.path.normpath(path)
 
     def create_status_bar(self):
-        """Create the status bar"""
+        """创建状态栏"""
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
 
     def create_dock_widgets(self):
-        """Create dock widgets for file tree and clusters"""
-        # File tree dock
-        self.file_dock = QDockWidget("Project", self)
+        """创建文件树和聚类列表的dock窗口"""
+        # 文件树dock
+        self.file_dock = QDockWidget("项目", self)
         self.file_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
 
         self.file_model = QFileSystemModel()
@@ -159,11 +147,17 @@ class IDEMainWindow(QMainWindow):
         self.file_tree.setModel(self.file_model)
         self.file_tree.setRootIndex(self.file_model.index(""))
 
+        self.file_tree.header().setStretchLastSection(False)  # 禁用最后一列自动拉伸
+        self.file_tree.setColumnWidth(0, int(self.width() * 0.8))
+        self.file_tree.setColumnWidth(1, int(self.width() * 0.1))
+        self.file_tree.setColumnWidth(3, int(self.width() * 0.1))
+
         self.file_dock.setWidget(self.file_tree)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.file_dock)
+        self.file_dock.setMinimumHeight(300)
 
-        # Cluster list dock
-        self.cluster_dock = QDockWidget("Clusters", self)
+        # 聚类列表dock
+        self.cluster_dock = QDockWidget("聚类", self)
         self.cluster_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
 
         self.cluster_list = QListWidget()
@@ -171,10 +165,16 @@ class IDEMainWindow(QMainWindow):
         self.cluster_dock.setWidget(self.cluster_list)
         self.addDockWidget(Qt.RightDockWidgetArea, self.cluster_dock)
 
+        self.resizeDocks(
+            [self.file_dock, self.cluster_dock],
+            [int(self.width() * 0.3), int(self.width() * 0.2)],
+            Qt.Horizontal
+        )
+
     def create_main_tab_dock(self):
-        """Create the main controls as a dock widget"""
-        # Создаем dock виджет для mainTab
-        main_dock = QDockWidget("Main Controls", self)
+        """创建主控件作为dock窗口"""
+        # 创建mainTab的dock窗口
+        main_dock = QDockWidget("主控件", self)
         main_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea)
 
         main_tab = QWidget()
@@ -183,7 +183,7 @@ class IDEMainWindow(QMainWindow):
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(5)
 
-        # Add UI components (без _create_image_display_area)
+        # 添加界面组件（不包含_create_image_display_area）
         self._create_yolo_settings_group(layout)
         self._create_similarity_group(layout)
         self._create_options_group(layout)
@@ -193,25 +193,30 @@ class IDEMainWindow(QMainWindow):
         main_dock.setWidget(main_tab)
         self.addDockWidget(Qt.LeftDockWidgetArea, main_dock)
 
-        # Размещаем dock в нижней части левой стороны
+        # 将dock放置在左侧底部
         self.splitDockWidget(self.file_dock, main_dock, Qt.Vertical)
+        self.resizeDocks(
+            [self.file_dock, main_dock],
+            [int(self.height() * 0.6), int(self.height() * 0.4)],  # 目标高度列表
+            Qt.Vertical  # 调整方向
+        )
 
     def _create_central_display_area(self):
-        """Create the central image display area"""
+        """创建中心图像显示区域"""
         self.image_tabs = QTabWidget()
         self.image_tabs.setTabsClosable(True)
         self.image_tabs.tabCloseRequested.connect(self.close_image_tab)
 
-        # Main cluster view tab
+        # 主聚类视图选项卡
         self.cluster_tab = QWidget()
         self.cluster_tab_layout = QVBoxLayout(self.cluster_tab)
         self.cluster_tab_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Cluster images scroll area - с центрированием
+        # 聚类图像滚动区域 - 居中显示
         self.cluster_images_area = QScrollArea()
         self.cluster_images_area.setWidgetResizable(True)
 
-        # Контейнер для центрирования
+        # 居中容器
         center_widget = QWidget()
         center_layout = QHBoxLayout(center_widget)
         center_layout.setContentsMargins(0, 0, 0, 0)
@@ -227,30 +232,30 @@ class IDEMainWindow(QMainWindow):
         self.cluster_images_area.setWidget(center_widget)
         self.cluster_tab_layout.addWidget(self.cluster_images_area)
 
-        # Cluster control buttons
+        # 聚类控制按钮
         cluster_btn_layout = QHBoxLayout()
         cluster_btn_layout.setContentsMargins(5, 5, 5, 5)
 
-        self.select_all_btn = QPushButton("Select All (A)")
+        self.select_all_btn = QPushButton("全选 (A)")
         cluster_btn_layout.addWidget(self.select_all_btn)
 
-        self.delete_btn = QPushButton("Delete Selected (D)")
+        self.delete_btn = QPushButton("删除选中 (D)")
         cluster_btn_layout.addWidget(self.delete_btn)
 
-        self.delete_cluster_duplicates_btn = QPushButton("Delete Cluster Duplicates (X)")
+        self.delete_cluster_duplicates_btn = QPushButton("删除聚类重复 (X)")
         cluster_btn_layout.addWidget(self.delete_cluster_duplicates_btn)
 
         self.cluster_tab_layout.addLayout(cluster_btn_layout)
 
-        # Add tab to image tabs
-        self.image_tabs.addTab(self.cluster_tab, "Clusters")
+        # 添加选项卡到图像选项卡
+        self.image_tabs.addTab(self.cluster_tab, "聚类")
 
-        # Устанавливаем image_tabs как центральный виджет
+        # 将image_tabs设置为中心窗口部件
         self.setCentralWidget(self.image_tabs)
 
     def _create_yolo_settings_group(self, parent_layout):
-        """Create YOLO settings group box"""
-        self.yolo_settings_group = QGroupBox("YOLO Settings")
+        """创建YOLO设置组框"""
+        self.yolo_settings_group = QGroupBox("YOLO设置")
         self.yolo_settings_group.setCheckable(True)
         self.yolo_settings_group.setChecked(False)
         self.yolo_settings_group.toggled.connect(self.toggle_yolo_settings)
@@ -258,14 +263,14 @@ class IDEMainWindow(QMainWindow):
         layout = QGridLayout()
         layout.setContentsMargins(5, 15, 5, 5)
 
-        # Model selection
-        self.yolo_model_label = QLabel("No model selected")
+        # 模型选择
+        self.yolo_model_label = QLabel("未选择模型")
         self.yolo_model_label.setWordWrap(True)
-        yolo_model_btn = QPushButton("Browse...")
+        yolo_model_btn = QPushButton("浏览...")
         yolo_model_btn.setObjectName("yoloModelButton")
         yolo_model_btn.setMaximumWidth(100)
 
-        # Parameters
+        # 参数
         self.conf_input = QLineEdit("55")
         self.conf_input.setValidator(QIntValidator(1, 100))
         self.conf_input.setMaximumWidth(60)
@@ -282,58 +287,58 @@ class IDEMainWindow(QMainWindow):
         self.iou_input.setValidator(QIntValidator(1, 100))
         self.iou_input.setMaximumWidth(60)
 
-        # Add widgets to layout
-        layout.addWidget(QLabel("Model:"), 0, 0)
+        # 将控件添加到布局
+        layout.addWidget(QLabel("模型："), 0, 0)
         layout.addWidget(self.yolo_model_label, 0, 1)
         layout.addWidget(yolo_model_btn, 0, 2)
 
-        layout.addWidget(QLabel("Confidence (%):"), 1, 0)
+        layout.addWidget(QLabel("置信度 (%)："), 1, 0)
         layout.addWidget(self.conf_input, 1, 1)
 
-        layout.addWidget(QLabel("Image Width:"), 2, 0)
+        layout.addWidget(QLabel("图像宽度："), 2, 0)
         layout.addWidget(self.img_w_input, 2, 1)
 
-        layout.addWidget(QLabel("Image Height:"), 3, 0)
+        layout.addWidget(QLabel("图像高度："), 3, 0)
         layout.addWidget(self.img_h_input, 3, 1)
 
-        layout.addWidget(QLabel("IOU Threshold (%):"), 4, 0)
+        layout.addWidget(QLabel("IOU阈值 (%)："), 4, 0)
         layout.addWidget(self.iou_input, 4, 1)
 
         self.yolo_settings_group.setLayout(layout)
         parent_layout.addWidget(self.yolo_settings_group)
 
     def _create_similarity_group(self, parent_layout):
-        """Create similarity settings group box"""
-        self.similarity_group = QGroupBox("Similarity Settings")
+        """创建相似性设置组框"""
+        self.similarity_group = QGroupBox("相似性设置")
         self.similarity_group.setCheckable(True)
         self.similarity_group.setChecked(False)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(5, 15, 5, 5)
 
-        # Hash method
+        # 哈希方法
         hash_layout = QHBoxLayout()
         self.hash_combo = QComboBox()
         self.hash_combo.addItems(["average_hash", "phash", "dhash"])
-        hash_layout.addWidget(QLabel("Hash method:"))
+        hash_layout.addWidget(QLabel("哈希方法："))
         hash_layout.addWidget(self.hash_combo)
         layout.addLayout(hash_layout)
 
-        # Threshold
+        # 阈值
         threshold_layout = QHBoxLayout()
         self.threshold_input = QLineEdit("5")
         self.threshold_input.setValidator(QIntValidator(0, 64))
         self.threshold_input.setMaximumWidth(40)
-        threshold_layout.addWidget(QLabel("Threshold (0-64):"))
+        threshold_layout.addWidget(QLabel("阈值 (0-64)："))
         threshold_layout.addWidget(self.threshold_input)
-        layout.addLayout(threshold_layout)
+        # layout.addLayout(threshold_layout)
 
-        # Presets
+        # 预设
         preset_layout = QHBoxLayout()
         self.similarity_preset = QComboBox()
-        self.similarity_preset.addItems(["Strict (2)", "Normal (5)", "Loose (10)"])
+        self.similarity_preset.addItems(["严格 (2)", "正常 (5)", "宽松 (10)"])
         self.similarity_preset.setCurrentIndex(1)
-        preset_layout.addWidget(QLabel("Presets:"))
+        preset_layout.addWidget(QLabel("预设："))
         preset_layout.addWidget(self.similarity_preset)
         layout.addLayout(preset_layout)
 
@@ -341,41 +346,41 @@ class IDEMainWindow(QMainWindow):
         parent_layout.addWidget(self.similarity_group)
 
     def _create_options_group(self, parent_layout):
-        """Create options group box"""
-        self.options_group = QGroupBox("Options")
+        """创建选项组框"""
+        self.options_group = QGroupBox("选项")
         self.options_group.setCheckable(True)
         self.options_group.setChecked(False)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(5, 15, 5, 5)
 
-        self.skip_single_check = QCheckBox("Skip single-image clusters")
-        self.skip_single_check.setChecked(True)
-        layout.addWidget(self.skip_single_check)
+        self.skip_single_check = QCheckBox("跳过单图像聚类")
+        self.skip_single_check.setChecked(False)
+        # layout.addWidget(self.skip_single_check)
 
-        self.yolo_labeling_check = QCheckBox("Show YOLO labeling")
+        self.yolo_labeling_check = QCheckBox("显示YOLO标注")
         layout.addWidget(self.yolo_labeling_check)
 
         self.options_group.setLayout(layout)
         parent_layout.addWidget(self.options_group)
 
     def _create_process_buttons(self, parent_layout):
-        """Create process buttons layout"""
+        """创建处理按钮布局"""
         button_layout = QHBoxLayout()
 
-        self.process_btn = QPushButton("Process Images")
+        self.process_btn = QPushButton("处理图像")
         self.process_btn.setObjectName("processButton")
         button_layout.addWidget(self.process_btn)
 
-        self.auto_label_btn = QPushButton("Auto Label")
+        self.auto_label_btn = QPushButton("自动标注")
         self.auto_label_btn.setObjectName("autoLabelButton")
         self.auto_label_btn.setEnabled(False)
-        button_layout.addWidget(self.auto_label_btn)
+        # button_layout.addWidget(self.auto_label_btn)
 
         parent_layout.addLayout(button_layout)
 
     def _create_progress_bars(self, parent_layout):
-        """Create progress bars"""
+        """创建进度条"""
         self.progress_bar = QProgressBar()
         self.progress_bar.setStyleSheet("""
             QProgressBar {
@@ -408,21 +413,21 @@ class IDEMainWindow(QMainWindow):
         parent_layout.addWidget(self.labeling_progress)
 
     def _create_image_display_area(self, parent_layout):
-        """Create image display area with tabs as central widget"""
+        """创建图像显示区域，包含选项卡作为中心窗口部件"""
         self.image_tabs = QTabWidget()
         self.image_tabs.setTabsClosable(True)
         self.image_tabs.tabCloseRequested.connect(self.close_image_tab)
 
-        # Main cluster view tab
+        # 主聚类视图选项卡
         self.cluster_tab = QWidget()
         self.cluster_tab_layout = QVBoxLayout(self.cluster_tab)
         self.cluster_tab_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Cluster images scroll area - теперь с центрированием
+        # 聚类图像滚动区域 - 居中显示
         self.cluster_images_area = QScrollArea()
         self.cluster_images_area.setWidgetResizable(True)
 
-        # Контейнер для центрирования
+        # 居中容器
         center_widget = QWidget()
         center_layout = QHBoxLayout(center_widget)
         center_layout.setContentsMargins(0, 0, 0, 0)
@@ -438,32 +443,32 @@ class IDEMainWindow(QMainWindow):
         self.cluster_images_area.setWidget(center_widget)
         self.cluster_tab_layout.addWidget(self.cluster_images_area)
 
-        # Cluster control buttons
+        # 聚类控制按钮
         cluster_btn_layout = QHBoxLayout()
         cluster_btn_layout.setContentsMargins(5, 5, 5, 5)
 
-        self.select_all_btn = QPushButton("Select All (A)")
+        self.select_all_btn = QPushButton("全选 (A)")
         cluster_btn_layout.addWidget(self.select_all_btn)
 
-        self.delete_btn = QPushButton("Delete Selected (D)")
+        self.delete_btn = QPushButton("删除选中 (D)")
         cluster_btn_layout.addWidget(self.delete_btn)
 
-        self.delete_cluster_duplicates_btn = QPushButton("Delete Cluster Duplicates (X)")
+        self.delete_cluster_duplicates_btn = QPushButton("删除聚类重复 (X)")
         cluster_btn_layout.addWidget(self.delete_cluster_duplicates_btn)
 
         self.cluster_tab_layout.addLayout(cluster_btn_layout)
 
-        # Add tab to image tabs
-        self.image_tabs.addTab(self.cluster_tab, "Clusters")
+        # 添加选项卡到图像选项卡
+        self.image_tabs.addTab(self.cluster_tab, "聚类")
 
-        # Устанавливаем image_tabs как центральный виджет
+        # 将image_tabs设置为中心窗口部件
         self.setCentralWidget(self.image_tabs)
 
     # --------------------------
-    # UI Utility Methods
+    # 界面实用方法
     # --------------------------
     def set_styles(self):
-        """Set styles for UI elements"""
+        """设置界面元素的样式"""
         style = """
             QGroupBox {
                 font-weight: bold;
@@ -493,11 +498,11 @@ class IDEMainWindow(QMainWindow):
         self.setStyleSheet(style)
 
     def toggle_yolo_settings(self, checked):
-        """Toggle YOLO settings panel visibility"""
-        self.yolo_settings_group.setTitle(f"YOLO Settings {'▼' if checked else '▶'}")
+        """切换YOLO设置面板的可见性"""
+        self.yolo_settings_group.setTitle(f"YOLO设置 {'▼' if checked else '▶'}")
 
     def reset_ui(self):
-        """Reset UI to initial state"""
+        """将界面重置为初始状态"""
         if hasattr(self, 'cluster_list'):
             self.cluster_list.clear()
 
@@ -508,6 +513,7 @@ class IDEMainWindow(QMainWindow):
 
         self.yolo_labels = {}
         self.label_colors = {}
+        self.all_label_colors = {}
         self.clusters = []
         self.current_cluster_index = -1
 
@@ -521,85 +527,85 @@ class IDEMainWindow(QMainWindow):
         gc.collect()
 
     # --------------------------
-    # Event Handlers
+    # 事件处理程序
     # --------------------------
     def setup_connections(self):
-        """Setup signal-slot connections"""
-        # YOLO Settings
+        """设置信号-槽连接"""
+        # YOLO设置
         yolo_model_btn = self.yolo_settings_group.findChild(QPushButton, "yoloModelButton")
         if yolo_model_btn:
             yolo_model_btn.clicked.connect(self.browse_yolo_model_file)
 
-        # Main buttons
+        # 主按钮
         self.process_btn.clicked.connect(self.process_images)
         self.auto_label_btn.clicked.connect(self.run_auto_labeling)
 
-        # Cluster list
+        # 聚类列表
         self.cluster_list.itemClicked.connect(self.show_cluster_images)
 
-        # Cluster control buttons
+        # 聚类控制按钮
         self.select_all_btn.clicked.connect(self.toggle_all_images)
         self.delete_btn.clicked.connect(self.delete_selected_images)
         self.delete_cluster_duplicates_btn.clicked.connect(self.delete_current_cluster_duplicates)
 
-        # Similarity preset combobox
+        # 相似性预设下拉框
         self.similarity_preset.currentIndexChanged.connect(self.update_similarity_preset)
 
-        # File tree double click
+        # 文件树双击
         self.file_tree.doubleClicked.connect(self.on_file_double_clicked)
         self.file_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.file_tree.customContextMenuRequested.connect(self.show_context_menu)
 
     def on_file_double_clicked(self, index):
-        """Handle file double click in file tree"""
+        """处理文件树中的双击事件"""
         file_path = self.file_model.filePath(index)
         if file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
             self.show_fullscreen_image(file_path)
 
     def show_context_menu(self, position):
-        # Получаем индекс элемента, на котором был сделан клик
+        # 获取点击的元素索引
         index = self.file_tree.indexAt(position)
 
         if index.isValid():
-            # Создаем контекстное меню
+            # 创建上下文菜单
             context_menu = QMenu(self)
 
-            # Добавляем действия в меню
-            action1 = context_menu.addAction("Открыть как датасет")
-            action2 = context_menu.addAction("Добавить как YOLO модель")
+            # 添加菜单项
+            action1 = context_menu.addAction("作为数据集打开")
+            action2 = context_menu.addAction("添加为YOLO模型")
 
-            # Показываем меню в позиции клика
+            # 在点击位置显示菜单
             action = context_menu.exec_(self.file_tree.viewport().mapToGlobal(position))
             file_path = self.file_model.filePath(index)
-            # Обрабатываем выбранное действие
+            # 处理选中的菜单项
             if action == action1:
                 self._open_folder(file_path)
             elif action == action2:
                 self._open_yolo_model(file_path)
 
     def close_image_tab(self, index):
-        """Close image tab (except main cluster tab)"""
+        """关闭图像选项卡（除了主聚类选项卡）"""
         if index != 0:
             self.image_tabs.removeTab(index)
 
     def close_tab(self, index):
-        """Close tab (except main tab)"""
+        """关闭选项卡（除了主选项卡）"""
         if index != 0:
             self.tab_widget.removeTab(index)
 
     # --------------------------
-    # File Operations
+    # 文件操作
     # --------------------------
     def browse_folder(self):
-        """Browse for image folder"""
+        """浏览图像文件夹"""
         try:
-            # Clear previous data
+            # 清空之前的数据
             self.reset_ui()
 
-            # Open folder dialog
+            # 打开文件夹选择对话框
             folder = QFileDialog.getExistingDirectory(
                 self,
-                "Select Image Folder",
+                "选择图像文件夹",
                 "",
                 QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
             )
@@ -607,34 +613,57 @@ class IDEMainWindow(QMainWindow):
             if folder:
                 self._open_folder(folder)
         except Exception as e:
-            error_msg = f"Error loading folder: {str(e)}"
+            error_msg = f"加载文件夹出错：{str(e)}"
             print(error_msg)
-            QMessageBox.critical(self, "Error", error_msg)
+            QMessageBox.critical(self, "错误", error_msg)
+
+    def dragEnterEvent(self, event):
+        """仅接受文件夹拖入"""
+        urls = event.mimeData().urls()
+        if urls:
+            path = urls[0].toLocalFile()
+            if os.path.isdir(path):  # 关键判断：仅当拖入的是文件夹时才接受
+                event.acceptProposedAction()
+            else:
+                event.ignore()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        """处理拖放事件"""
+        urls = event.mimeData().urls()
+        if urls:
+            path = urls[0].toLocalFile()
+            if os.path.isdir(path):
+                self._open_folder(path)
+            elif os.path.isfile(path) and path.lower().endswith(('.png','.jpg','.jpeg','.bmp','.gif')):
+                # 如果是图片，则打开其所在文件夹
+                self._open_folder(os.path.dirname(path))
 
     def _open_folder(self, folder_path):
         self.image_folder = self.get_normalized_path(folder_path)
         self.file_dock.setWindowTitle(f"{self.file_dock.windowTitle()}: {os.path.basename(self.image_folder)}")
 
-        # Update file tree
+        # 更新文件树
         self.file_model.setRootPath(self.image_folder)
         self.file_tree.setRootIndex(self.file_model.index(self.image_folder))
 
-        # Clear memory
+        # 清空内存
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
 
-        # Enable process button
+        # 启用处理按钮
         self.process_btn.setEnabled(True)
 
 
     def browse_yolo_model_file(self):
-        """Browse for YOLO model file"""
+        """浏览YOLO模型文件"""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select YOLO Model File",
+            "选择YOLO模型文件",
             "",
-            "YOLO Model Files (*.pt)"
+            "YOLO模型文件 (*.pt)"
         )
 
         if file_path:
@@ -645,12 +674,12 @@ class IDEMainWindow(QMainWindow):
             QApplication.setOverrideCursor(Qt.WaitCursor)
             normalized_path = self.get_normalized_path(file_path)
 
-            print(f"Loading model from: {normalized_path}")
+            print(f"正在从以下路径加载模型：{normalized_path}")
 
             if not os.path.exists(normalized_path):
-                raise FileNotFoundError(f"Model file not found at: {normalized_path}")
+                raise FileNotFoundError(f"在以下路径未找到模型文件：{normalized_path}")
 
-            # Load model
+            # 加载模型
             self.yolo_model_pt = YOLO(normalized_path)
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
             self.yolo_model_pt.to(device)
@@ -661,51 +690,51 @@ class IDEMainWindow(QMainWindow):
 
         except Exception as e:
             QMessageBox.critical(
-                self, "Error",
-                f"Failed to load YOLO model:\n{str(e)}\nPath: {normalized_path}"
+                self, "错误",
+                f"加载YOLO模型失败：\n{str(e)}\n路径：{normalized_path}"
             )
             self.yolo_model_pt = None
             self.yolo_model = ""
-            self.yolo_model_label.setText("No YOLO model selected")
+            self.yolo_model_label.setText("未选择YOLO模型")
 
         finally:
             QApplication.restoreOverrideCursor()
 
     # --------------------------
-    # Image Processing
+    # 图像处理
     # --------------------------
     def process_images(self):
-        """Process images for clustering"""
+        """处理图像进行聚类"""
         try:
-            # Validate folder
+            # 验证文件夹
             if not hasattr(self, 'image_folder') or not self.image_folder:
-                QMessageBox.warning(self, "Warning", "Please select a folder first!")
+                QMessageBox.warning(self, "警告", "请先选择一个文件夹！")
                 return
 
-            # Cleanup before processing
+            # 处理前清理
             self.cleanup_before_processing()
 
-            # Validate threshold
+            # 验证阈值
             try:
                 threshold = int(self.threshold_input.text())
                 if not 0 <= threshold <= 64:
                     raise ValueError
             except ValueError:
-                QMessageBox.warning(self, "Warning", "Please enter a valid threshold (0-64)")
+                QMessageBox.warning(self, "警告", "请输入有效的阈值（0-64）")
                 return
 
-            # Cancel previous processing
+            # 取消之前的处理
             if hasattr(self, 'processing_thread') and self.processing_thread and self.processing_thread.isRunning():
                 self.processing_thread.canceled = True
                 self.processing_thread.wait()
 
-            # Prepare UI
+            # 准备界面
             self.reset_ui()
-            self.progress_bar.setFormat("Preparing... %p%")
+            self.progress_bar.setFormat("准备中... %p%")
             self.progress_bar.setValue(0)
-            self.status_bar.showMessage("Starting image processing...")
+            self.status_bar.showMessage("开始处理图像...")
 
-            # Create processing thread
+            # 创建处理线程
             self.processing_thread = ImageProcessingThread(
                 self.image_folder,
                 threshold,
@@ -713,41 +742,41 @@ class IDEMainWindow(QMainWindow):
                 self.hash_combo.currentText()
             )
 
-            # Connect signals
+            # 连接信号
             self.processing_thread.progress_updated.connect(self.update_progress)
             self.processing_thread.cluster_found.connect(self.add_cluster)
             self.processing_thread.finished_clustering.connect(self.on_clustering_finished)
             self.processing_thread.finished_clustering.connect(self.check_yolo_model_ready)
 
-            # Start thread
+            # 启动线程
             self.processing_thread.start()
 
         except Exception as e:
-            error_msg = f"Processing failed: {str(e)}"
-            QMessageBox.critical(self, "Error", error_msg)
-            print(f"Processing error: {traceback.format_exc()}")
+            error_msg = f"处理失败：{str(e)}"
+            QMessageBox.critical(self, "错误", error_msg)
+            print(f"处理错误：{traceback.format_exc()}")
             if hasattr(self, 'status_bar'):
                 self.status_bar.showMessage(error_msg, 5000)
 
     def cleanup_before_processing(self):
-        """Cleanup before processing"""
+        """处理前清理"""
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
 
-        # Close open dialogs
+        # 关闭打开的对话框
         for widget in QApplication.topLevelWidgets():
             if isinstance(widget, QDialog) and widget != self:
                 widget.close()
 
-        # Clear temporary data
+        # 清空临时数据
         if hasattr(self, 'yolo_labels'):
             self.yolo_labels.clear()
         if hasattr(self, 'label_colors'):
             self.label_colors.clear()
 
     def update_progress(self, value, message):
-        """Update progress bar and status"""
+        """更新进度条和状态"""
         if hasattr(self, 'progress_bar'):
             self.progress_bar.setValue(value)
             self.progress_bar.setFormat(f"{message}... {value}%")
@@ -756,7 +785,7 @@ class IDEMainWindow(QMainWindow):
             self.status_bar.showMessage(message)
 
     def check_yolo_model_ready(self):
-        """Check if YOLO model is ready for auto-labeling"""
+        """检查YOLO模型是否准备好进行自动标注"""
         model_loaded = self.yolo_model_pt is not None
         processing_done = not (hasattr(self, 'processing_thread') and
                                self.processing_thread and
@@ -766,10 +795,10 @@ class IDEMainWindow(QMainWindow):
             self.auto_label_btn.setEnabled(model_loaded and processing_done)
 
     # --------------------------
-    # Cluster Management
+    # 聚类管理
     # --------------------------
     def add_cluster(self, cluster):
-        """Add new cluster to the list"""
+        """将新聚类添加到列表"""
         if not hasattr(self, 'clusters'):
             self.clusters = []
 
@@ -779,7 +808,7 @@ class IDEMainWindow(QMainWindow):
         if hasattr(self, 'cluster_list'):
             self.cluster_list.clear()
             for i, cluster in enumerate(self.clusters):
-                item = QListWidgetItem(f"Cluster {i + 1} ({len(cluster)} images)")
+                item = QListWidgetItem(f"聚类 {i + 1} ({len(cluster)} 张图像)")
                 item.setData(Qt.UserRole, i)
                 self.cluster_list.addItem(item)
 
@@ -787,29 +816,29 @@ class IDEMainWindow(QMainWindow):
                 self.cluster_list.setCurrentRow(0)
 
     def on_clustering_finished(self):
-        """Actions after clustering is finished"""
-        self.progress_bar.setFormat("Done! %p%")
-        self.status_bar.showMessage("Clustering completed", 5000)
+        """聚类完成后的操作"""
+        self.progress_bar.setFormat("完成！ %p%")
+        self.status_bar.showMessage("聚类完成", 5000)
 
         if not self.clusters:
             QMessageBox.information(
-                self, "Information",
-                "No clusters found matching your criteria!"
+                self, "信息",
+                "未找到符合您标准的聚类！"
             )
 
     def show_cluster_images(self, item):
-        """Показываем изображения кластера с ленивой загрузкой"""
+        """显示聚类中的图像，支持懒加载"""
         if not item or not hasattr(self, 'clusters'):
             return
 
         try:
-            # Отключаем предыдущий обработчик скролла
+            # 断开之前的滚动处理程序
             if self.scroll_connection is not None:
                 scroll_bar = self.cluster_images_area.verticalScrollBar()
                 scroll_bar.valueChanged.disconnect(self.scroll_connection)
                 self.scroll_connection = None
 
-            # Сбрасываем состояние
+            # 重置状态
             self._set_image_highlight(self.current_image_index, False)
             self.current_image_index = -1
             self.current_loaded = 0
@@ -820,18 +849,18 @@ class IDEMainWindow(QMainWindow):
 
             self.clear_image_display()
 
-            # Загружаем первую порцию изображений
+            # 加载第一批图像
             self._load_batch_of_images()
 
-            # Настраиваем обработчик прокрутки
+            # 设置滚动事件处理程序
             self.scroll_connection = self.cluster_images_area.verticalScrollBar().valueChanged.connect(
                 self._handle_scroll_event
             )
         except Exception as e:
-            print(f"Error showing cluster: {e}")
+            print(f"显示聚类时出错：{e}")
 
     def _load_batch_of_images(self):
-        """Загружает порцию изображений"""
+        """加载一批图像"""
         if not hasattr(self, 'current_cluster'):
             return
 
@@ -844,7 +873,7 @@ class IDEMainWindow(QMainWindow):
             if hasattr(self, 'cluster_images_layout'):
                 self.cluster_images_layout.addWidget(img_widget)
 
-                # Добавляем разделитель, если не последний элемент
+                # 如果不是最后一个元素，添加分隔线
                 if i < end - 1:
                     separator = QFrame()
                     separator.setFrameShape(QFrame.HLine)
@@ -853,10 +882,10 @@ class IDEMainWindow(QMainWindow):
             self.delete_btn.setEnabled(True)
         self.current_loaded = end
         self.is_loading = False
-        print(f"Loaded {end} of {len(self.current_cluster)} images")  # Отладочная информация
+        print(f"已加载 {end} 张图像，共 {len(self.current_cluster)} 张")  # 调试信息
 
     def _handle_scroll_event(self):
-        """Обрабатывает событие скролла для подгрузки новых изображений"""
+        """处理滚动事件以加载新图像"""
         if self.is_loading:
             return
         scroll_bar = self.cluster_images_area.verticalScrollBar()
@@ -864,7 +893,7 @@ class IDEMainWindow(QMainWindow):
             self._load_batch_of_images()
 
     def create_image_widget(self, img_path):
-        """Create widget for displaying image in cluster"""
+        """为聚类中的图像创建显示控件"""
         widget = QWidget()
         widget.setObjectName("image_widget")
         widget.setProperty("selected", False)
@@ -882,24 +911,24 @@ class IDEMainWindow(QMainWindow):
         layout = QHBoxLayout(widget)
         layout.setContentsMargins(2, 2, 2, 2)
 
-        # Checkbox
+        # 复选框
         checkbox = QCheckBox()
         checkbox.setObjectName("image_checkbox")
         checkbox.setProperty("image_path", img_path)
         layout.addWidget(checkbox)
 
-        # Thumbnail - теперь с ленивой загрузкой
+        # 缩略图 - 支持懒加载
         thumbnail_label = ClickableLabel()
         thumbnail_label.setAlignment(Qt.AlignCenter)
         thumbnail_label.setImagePath(img_path)
         thumbnail_label.clicked.connect(lambda: self.show_fullscreen_image(img_path))
 
-        # Устанавливаем плейсхолдер перед загрузкой
+        # 在加载前设置占位符
         thumbnail_label.setMinimumSize(300, 300)
-        thumbnail_label.setText("Loading...")
+        thumbnail_label.setText("加载中...")
         layout.addWidget(thumbnail_label)
 
-        # Info panel
+        # 信息面板
         info_widget = QWidget()
         info_layout = QVBoxLayout(info_widget)
 
@@ -914,14 +943,14 @@ class IDEMainWindow(QMainWindow):
         if self.yolo_labeling_check.isChecked():
             labels = self.get_yolo_labels(img_path)
             if labels:
-                labels_text = "\n".join([f"Class: {l[0]}" for l in labels])
-                labels_label = QLabel(f"YOLO Labels ({len(labels)}):\n{labels_text}")
+                labels_text = "\n".join([f"类别：{l[0]}" for l in labels])
+                labels_label = QLabel(f"YOLO标注 ({len(labels)})：\n{labels_text}")
                 labels_label.setWordWrap(True)
                 info_layout.addWidget(labels_label)
 
         layout.addWidget(info_widget)
 
-        # Separator
+        # 分隔线
         separator = QFrame()
         separator.setFrameShape(QFrame.HLine)
         self.cluster_images_layout.addWidget(separator)
@@ -931,18 +960,18 @@ class IDEMainWindow(QMainWindow):
         return widget
 
     def _load_thumbnail_async(self, label, img_path):
-        """Load thumbnail in background with error handling"""
+        """在后台加载缩略图，包含错误处理"""
 
         def load_image():
             try:
-                # Проверяем, существует ли еще виджет
+                # 检查控件是否仍然存在
                 if not label or not label.parent():
                     return
 
-                # Загружаем изображение
+                # 加载图像
                 pixmap = self.load_image_with_yolo_labels(img_path)
 
-                # Проверяем, существует ли еще виджет после долгой загрузки
+                # 检查长时间加载后控件是否仍然存在
                 if not label or not label.parent():
                     return
 
@@ -953,18 +982,18 @@ class IDEMainWindow(QMainWindow):
                         Qt.SmoothTransformation
                     ))
                 else:
-                    label.setText("Invalid image")
+                    label.setText("无效图像")
             except Exception as e:
                 if label and label.parent():
-                    label.setText(f"Load error: {str(e)}")
-                print(f"Error loading thumbnail: {e}")
+                    label.setText(f"加载错误：{str(e)}")
+                print(f"加载缩略图出错：{e}")
 
-        # Запускаем с небольшой задержкой для приоритизации видимых элементов
+        # 以短暂延迟启动以优先加载可见元素
         QTimer.singleShot(100, load_image)
 
     def clear_image_display(self):
-        """Очищает область отображения изображений"""
-        # Отключаем обработчик скролла
+        """清空图像显示区域"""
+        # 断开滚动处理程序
         if self.scroll_connection is not None:
             try:
                 scroll_bar = self.cluster_images_area.verticalScrollBar()
@@ -973,7 +1002,7 @@ class IDEMainWindow(QMainWindow):
                 pass
             self.scroll_connection = None
 
-        # Очищаем layout
+        # 清空布局
         while self.cluster_images_layout.count():
             child = self.cluster_images_layout.takeAt(0)
             if child.widget():
@@ -984,7 +1013,7 @@ class IDEMainWindow(QMainWindow):
         self.is_loading = False
 
     def get_selected_images(self):
-        """Get list of selected images in current cluster"""
+        """获取当前聚类中选中的图像列表"""
         selected = []
         for i in range(self.cluster_images_layout.count()):
             widget = self.cluster_images_layout.itemAt(i).widget()
@@ -995,17 +1024,17 @@ class IDEMainWindow(QMainWindow):
         return selected
 
     def toggle_all_images(self):
-        """Toggle selection of all images in current cluster"""
+        """切换当前聚类中所有图像的选中状态"""
         if self.current_cluster_index == -1:
             return
 
-        # Check if any images are unchecked
+        # 检查是否有未选中的图像
         has_unchecked = any(
             widget.findChild(QCheckBox, "image_checkbox").isChecked() == False
             for widget in self.get_image_widgets()
         )
 
-        # Set new state based on unchecked images
+        # 根据未选中图像设置新状态
         new_state = has_unchecked
 
         for widget in self.get_image_widgets():
@@ -1013,7 +1042,7 @@ class IDEMainWindow(QMainWindow):
             checkbox.setChecked(new_state)
 
     def get_image_widgets(self):
-        """Get all image widgets in current cluster"""
+        """获取当前聚类中的所有图像控件"""
         widgets = []
         for i in range(self.cluster_images_layout.count()):
             widget = self.cluster_images_layout.itemAt(i).widget()
@@ -1022,36 +1051,57 @@ class IDEMainWindow(QMainWindow):
         return widgets
 
     def update_similarity_preset(self, index):
-        """Update similarity threshold from preset"""
+        """从预设更新相似性阈值"""
         presets = [2, 5, 10]
         self.threshold_input.setText(str(presets[index]))
 
     # --------------------------
-    # Image Operations
+    # 图像操作, 我们要干的的都在这里
+    # @modified by leafan @20250609.
     # --------------------------
     @pyqtSlot(str)
     def show_fullscreen_image(self, img_path):
-        """Show image in fullscreen dialog"""
+        """在全屏对话框中显示图像"""
         try:
             if not os.path.exists(img_path):
-                QMessageBox.warning(self, "Error", "Image file not found!")
+                QMessageBox.warning(self, "错误", "图像文件未找到！")
                 return
 
             self.cleanup_before_processing()
 
             labels = self.get_yolo_labels(img_path)
+            classes = self.get_yolo_classes()
 
-            if img_path not in self.label_colors:
-                self.label_colors[img_path] = [
-                    (random.randint(50, 255), random.randint(50, 255), random.randint(50, 255))
-                    for _ in range(len(labels))
-                ]
+            # 设置标记颜色,尽量与背景色反着来
+            bg_color = get_dominant_color(img_path)  # 需要实现获取主色函数
+            base_colors = [
+                (255, 0, 0),    # 🔴 红色
+                (0, 255, 0),    # 🟢 绿色
+                (0, 0, 255),    # 🔵 蓝色
+                (255, 255, 0),  # 💛 黄色
+                (255, 0, 255),  # 🟣 品红
+                (255, 255, 255) # ⬜ 白色
+            ]
+            self.all_label_colors[img_path] = [
+                # 第一个取背景色的反色, 如果多余1个标记, 从默认选项里面取
+                get_contrast_color(bg_color) if i < 1 else base_colors[i % len(base_colors)]
+                for i in range(len(classes)//2)# 一张图不需要全部标签
+            ]
+
+            self.label_colors[img_path] = [
+                self.all_label_colors[img_path][i%len(self.all_label_colors[img_path])]
+                for i in range(len(labels)) 
+            ]
+
+            # print(f"bg_color: {bg_color}, self.all_label_colors: {self.all_label_colors}, self.label_colors: {self.label_colors}")
 
             dialog = FullScreenImageDialog(
                 img_path,
                 labels,
+                self.all_label_colors[img_path],
                 self.label_colors[img_path],
                 self,
+                classes,
                 yolo_model=self.yolo_model_pt,
                 yolo_img_w=int(self.img_w_input.text()),
                 yolo_img_h=int(self.img_h_input.text()),
@@ -1070,11 +1120,11 @@ class IDEMainWindow(QMainWindow):
                 self.update_cluster_display(img_path)
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Cannot show image: {str(e)}")
-            print(f"Error showing image: {traceback.format_exc()}")
+            QMessageBox.critical(self, "错误", f"无法显示图像：{str(e)}")
+            print(f"显示图像出错：{traceback.format_exc()}")
 
     def update_cluster_display(self, img_path):
-        """Update cluster display after label changes"""
+        """在标签更改后更新聚类显示"""
         current_item = self.cluster_list.currentItem()
         if current_item:
             self.clear_image_display()
@@ -1094,7 +1144,7 @@ class IDEMainWindow(QMainWindow):
             self.cluster_images_area.viewport().update()
 
     def load_image_with_yolo_labels(self, img_path):
-        """Load image with YOLO labels drawn"""
+        """加载带有YOLO标签的图像"""
         if not os.path.exists(img_path):
             return QPixmap()
 
@@ -1148,15 +1198,15 @@ class IDEMainWindow(QMainWindow):
                 qim = QImage(data, img.size[0], img.size[1], QImage.Format_RGBA8888)
                 return QPixmap.fromImage(qim)
         except Exception as e:
-            print(f"Error loading image {img_path}: {e}")
+            print(f"加载图像 {img_path} 时出错：{e}")
             return QPixmap()
 
     def get_yolo_labels(self, img_path):
-        """Get YOLO labels for image"""
+        """获取图像的YOLO标签"""
         if img_path in self.yolo_labels:
             return self.yolo_labels[img_path]
 
-        txt_path = os.path.splitext(img_path)[0] + '.txt'
+        txt_path = get_label_txt(img_path)
         labels = []
 
         if os.path.exists(txt_path):
@@ -1176,13 +1226,46 @@ class IDEMainWindow(QMainWindow):
                             except ValueError:
                                 continue
             except Exception as e:
-                print(f"Error reading YOLO labels: {e}")
+                print(f"读取YOLO标签出错：{e}")
 
         self.yolo_labels[img_path] = labels
         return labels
+    
+
+    def get_yolo_classes(self, classes_path="./data.yaml"):
+        """获取YOLO的类别
+        
+        Args:
+            classes_path (str): YAML配置文件路径，默认为"./data.yaml"
+        Returns:
+            list: 包含所有类别名称的列表，如['Stain', 'Scratch', ...]
+        """
+        try:
+            # 检查文件是否存在
+            if not os.path.exists(classes_path):
+                return []
+            
+            # 使用safe_load加载YAML文件
+            with open(classes_path, 'r', encoding='utf-8') as file:
+                data = yaml.safe_load(file)
+            
+            # 检查names字段是否存在
+            if 'names' not in data:
+                return []
+            
+            # 返回names数组
+            return data['names']
+        
+        except yaml.YAMLError as e:
+            raise ValueError(f"YAML parsing error: {str(e)}")
+        except Exception as e:
+            raise Exception(f"Error loading YAML classes: {str(e)}")
+
+
+
 
     def save_yolo_labels(self, img_path, labels):
-        """Save YOLO labels to file"""
+        """将YOLO标签保存到文件"""
         txt_path = os.path.splitext(img_path)[0] + '.txt'
 
         if not labels:
@@ -1190,7 +1273,7 @@ class IDEMainWindow(QMainWindow):
                 try:
                     os.remove(txt_path)
                 except Exception as e:
-                    print(f"Error deleting label file: {e}")
+                    print(f"删除标签文件出错：{e}")
             return
 
         try:
@@ -1198,24 +1281,24 @@ class IDEMainWindow(QMainWindow):
                 for label in labels:
                     f.write(f"{label[0]} {label[1]} {label[2]} {label[3]} {label[4]}\n")
         except Exception as e:
-            print(f"Error saving YOLO labels: {e}")
+            print(f"保存YOLO标签出错：{e}")
 
     # --------------------------
-    # Delete Operations
+    # 删除操作
     # --------------------------
     def delete_selected_images(self):
-        """Delete selected images from current cluster"""
+        """从当前聚类中删除选中的图像"""
         if self.current_cluster_index == -1:
             return
 
         selected_images = self.get_selected_images()
         if not selected_images:
-            QMessageBox.warning(self, "Warning", "No images selected for deletion!")
+            QMessageBox.warning(self, "警告", "未选择要删除的图像！")
             return
 
         reply = QMessageBox.question(
-            self, "Confirm Delete",
-            f"Delete {len(selected_images)} selected images and their labels?",
+            self, "确认删除",
+            f"删除 {len(selected_images)} 张选中的图像及其标签？",
             QMessageBox.Yes | QMessageBox.No
         )
 
@@ -1238,12 +1321,12 @@ class IDEMainWindow(QMainWindow):
                         del self.label_colors[img_path]
 
                 except Exception as e:
-                    print(f"Error deleting {img_path}: {e}")
+                    print(f"删除 {img_path} 时出错：{e}")
 
             self.show_cluster_images(self.cluster_list.currentItem())
 
             current_item = self.cluster_list.currentItem()
-            current_item.setText(f"Cluster {self.current_cluster_index + 1} ({len(cluster)} images)")
+            current_item.setText(f"聚类 {self.current_cluster_index + 1} ({len(cluster)} 张图像)")
 
             if not cluster:
                 self.cluster_list.takeItem(self.cluster_list.row(current_item))
@@ -1252,27 +1335,27 @@ class IDEMainWindow(QMainWindow):
                 self.delete_btn.setEnabled(False)
 
     def delete_current_cluster_duplicates(self):
-        """Delete all duplicates in current cluster, keeping one image"""
+        """删除当前聚类中的所有重复图像，仅保留一张"""
         if self.current_cluster_index == -1:
-            QMessageBox.warning(self, "Warning", "No cluster selected!")
+            QMessageBox.warning(self, "警告", "未选择聚类！")
             return
 
         cluster = self.clusters[self.current_cluster_index]
         if len(cluster) <= 1:
-            QMessageBox.information(self, "Information", "Cluster already contains only one image!")
+            QMessageBox.information(self, "信息", "聚类已仅包含一张图像！")
             return
 
         reply = QMessageBox.question(
-            self, "Confirm Delete",
-            f"This will delete {len(cluster) - 1} images from this cluster,\n"
-            "keeping only one. Continue?",
+            self, "确认删除",
+            f"将从此聚类中删除 {len(cluster) - 1} 张图像，\n"
+            "仅保留一张。继续？",
             QMessageBox.Yes | QMessageBox.No
         )
 
         if reply == QMessageBox.No:
             return
 
-        # Keep first image, delete others
+        # 保留第一张图像，删除其他
         image_to_keep = cluster[0]
         deleted_count = 0
 
@@ -1291,29 +1374,29 @@ class IDEMainWindow(QMainWindow):
 
                 deleted_count += 1
             except Exception as e:
-                print(f"Error deleting {img_path}: {e}")
+                print(f"删除 {img_path} 时出错：{e}")
 
-        # Update cluster - keep only one image
+        # 更新聚类 - 仅保留一张图像
         self.clusters[self.current_cluster_index] = [image_to_keep]
 
-        # Update UI
+        # 更新界面
         current_item = self.cluster_list.currentItem()
-        current_item.setText(f"Cluster {self.current_cluster_index + 1} (1 image)")
+        current_item.setText(f"聚类 {self.current_cluster_index + 1} (1 张图像)")
         self.show_cluster_images(current_item)
 
         QMessageBox.information(
-            self, "Operation Complete",
-            f"Deleted {deleted_count} duplicate images.\n"
-            f"Kept 1 unique image in cluster."
+            self, "操作完成",
+            f"已删除 {deleted_count} 张重复图像。\n"
+            f"在聚类中保留了 1 张唯一图像。"
         )
 
     def run_auto_labeling(self):
-        """Run auto-labeling on unlabeled images"""
+        """对未标注的图像运行自动标注"""
         if not self.yolo_model_pt:
-            QMessageBox.warning(self, "Warning", "YOLO model not loaded!")
+            QMessageBox.warning(self, "警告", "YOLO模型未加载！")
             return
 
-        # Find unlabeled images
+        # 查找未标注的图像
         unlabeled_images = []
         for cluster in self.clusters:
             for img_path in cluster:
@@ -1324,13 +1407,13 @@ class IDEMainWindow(QMainWindow):
                     unlabeled_images.append(img_path)
 
         if not unlabeled_images:
-            QMessageBox.information(self, "Information", "All images already have labels!")
+            QMessageBox.information(self, "信息", "所有图像已具有标签！")
             return
 
         reply = QMessageBox.question(
-            self, "Confirm Auto Labeling",
-            f"Found {len(unlabeled_images)} images without labels.\n"
-            "Run YOLO model to automatically label them?",
+            self, "确认自动标注",
+            f"发现 {len(unlabeled_images)} 张没有标签的图像。\n"
+            "运行YOLO模型以自动标注它们？",
             QMessageBox.Yes | QMessageBox.No
         )
 
@@ -1338,29 +1421,29 @@ class IDEMainWindow(QMainWindow):
             self.start_auto_labeling(unlabeled_images)
 
     # --------------------------
-    # Hot Keys Operations
+    # 快捷键操作
     # --------------------------
     def keyPressEvent(self, event):
-        """Обработка нажатий клавиш"""
+        """处理键盘按键事件"""
         if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
-            # Открываем выделенное изображение по Enter
+            # 通过Enter键打开选中的图像
             selected_image = self.get_current_selected_image()
             if selected_image:
                 self.show_fullscreen_image(selected_image)
             return
-        if event.key() == Qt.Key_S:  # Следующий кластер
+        if event.key() == Qt.Key_S:  # 下一个聚类
             self.next_cluster()
-        elif event.key() == Qt.Key_W:  # Предыдущий кластер
+        elif event.key() == Qt.Key_W:  # 上一个聚类
             self.prev_cluster()
-        elif event.key() == Qt.Key_A:  # Инвертировать выделение всех
+        elif event.key() == Qt.Key_A:  # 反转所有图像的选中状态
             self.toggle_all_images()
-        elif event.key() == Qt.Key_D:  # Удалить выделенные
+        elif event.key() == Qt.Key_D:  # 删除选中的图像
             self.delete_selected_images()
-        elif event.key() == Qt.Key_L:  # Следующее изображение (выделение синей рамкой)
+        elif event.key() == Qt.Key_L:  # 下一个图像（蓝色边框选中）
             self.next_image()
-        elif event.key() == Qt.Key_O:  # Предыдущее изображение (выделение синей рамкой)
+        elif event.key() == Qt.Key_O:  # 上一个图像（蓝色边框选中）
             self.prev_image()
-        elif event.key() == Qt.Key_P:  # Переключить чекбокс текущего изображения
+        elif event.key() == Qt.Key_P:  # 切换当前图像的复选框
             self.toggle_current_image()
         elif event.key() == Qt.Key_X:
             self.delete_current_cluster_duplicates()
@@ -1368,7 +1451,7 @@ class IDEMainWindow(QMainWindow):
             super().keyPressEvent(event)
 
     def get_current_selected_image(self):
-        """Получить текущее выделенное изображение (с синей рамкой)"""
+        """获取当前选中的图像（带蓝色边框）"""
         if self.current_cluster_index == -1 or self.current_image_index == -1:
             return None
 
@@ -1381,29 +1464,29 @@ class IDEMainWindow(QMainWindow):
         return None
 
     def next_cluster(self):
-        """Перейти к следующему кластеру"""
+        """跳转到下一个聚类"""
         if not hasattr(self, 'cluster_list') or self.cluster_list.count() == 0:
             return
 
         current_row = self.cluster_list.currentRow()
         if current_row < self.cluster_list.count() - 1:
             self.cluster_list.setCurrentRow(current_row + 1)
-            self.current_image_index = -1  # Сброс выделения изображения
+            self.current_image_index = -1  # 重置图像选中状态
             self.show_cluster_images(self.cluster_list.currentItem())
 
     def prev_cluster(self):
-        """Перейти к предыдущему кластеру"""
+        """跳转到上一个聚类"""
         if not hasattr(self, 'cluster_list') or self.cluster_list.count() == 0:
             return
 
         current_row = self.cluster_list.currentRow()
         if current_row > 0:
             self.cluster_list.setCurrentRow(current_row - 1)
-            self.current_image_index = -1  # Сброс выделения изображения
+            self.current_image_index = -1  # 重置图像选中状态
             self.show_cluster_images(self.cluster_list.currentItem())
 
     def next_image(self):
-        """Выделить следующее изображение в текущем кластере"""
+        """选中当前聚类中的下一个图像"""
         if self.current_cluster_index == -1:
             return
 
@@ -1411,23 +1494,23 @@ class IDEMainWindow(QMainWindow):
         if not cluster:
             return
 
-        # Снимаем выделение с текущего изображения
+        # 取消当前图像的选中状态
         self._set_image_highlight(self.current_image_index, False)
 
-        # Переходим к следующему
+        # 移动到下一个
         if self.current_image_index < len(cluster) - 1:
             self.current_image_index += 1
         else:
             self.current_image_index = 0
 
-        # Устанавливаем выделение на новое изображение
+        # 设置新图像的选中状态
         self._set_image_highlight(self.current_image_index, True)
 
-        # Прокручиваем к выделенному изображению
+        # 滚动到选中的图像
         self._scroll_to_image(self.current_image_index)
 
     def prev_image(self):
-        """Выделить предыдущее изображение в текущем кластере"""
+        """选中当前聚类中的上一个图像"""
         if self.current_cluster_index == -1:
             return
 
@@ -1435,27 +1518,27 @@ class IDEMainWindow(QMainWindow):
         if not cluster:
             return
 
-        # Снимаем выделение с текущего изображения
+        # 取消当前图像的选中状态
         self._set_image_highlight(self.current_image_index, False)
 
-        # Переходим к предыдущему
+        # 移动到上一个
         if self.current_image_index > 0:
             self.current_image_index -= 1
         else:
             self.current_image_index = len(cluster) - 1
 
-        # Устанавливаем выделение на новое изображение
+        # 设置新图像的选中状态
         self._set_image_highlight(self.current_image_index, True)
 
-        # Прокручиваем к выделенному изображению
+        # 滚动到选中的图像
         self._scroll_to_image(self.current_image_index)
 
     def toggle_current_image(self):
-        """Переключить чекбокс текущего выделенного изображения"""
+        """切换当前选中图像的复选框"""
         if self.current_cluster_index == -1 or self.current_image_index == -1:
             return
 
-        # Находим виджет изображения
+        # 查找图像控件
         widget = self._get_image_widget_at_index(self.current_image_index)
         if widget:
             checkbox = widget.findChild(QCheckBox, "image_checkbox")
@@ -1463,18 +1546,18 @@ class IDEMainWindow(QMainWindow):
                 checkbox.setChecked(not checkbox.isChecked())
 
     def _set_image_highlight(self, index, highlight):
-        """Установить или снять выделение (синюю рамку) с изображения"""
+        """设置或取消图像的选中状态（蓝色边框）"""
         widget = self._get_image_widget_at_index(index)
         if widget:
             widget.setProperty("selected", highlight)
             widget.setStyle(widget.style())
 
     def _get_image_widget_at_index(self, index):
-        """Получить виджет изображения по индексу"""
+        """根据索引获取图像控件"""
         if index == -1:
             return None
 
-        # Считаем только виджеты изображений (пропускаем разделители)
+        # 仅计数图像控件（跳过分隔线）
         image_widgets = []
         for i in range(self.cluster_images_layout.count()):
             item = self.cluster_images_layout.itemAt(i)
@@ -1488,20 +1571,56 @@ class IDEMainWindow(QMainWindow):
         return None
 
     def _scroll_to_image(self, index):
-        """Прокрутить к изображению с указанным индексом"""
+        """滚动到指定索引的图像"""
         widget = self._get_image_widget_at_index(index)
         if widget:
             self.cluster_images_area.ensureWidgetVisible(widget)
 
+    def _init_platform_settings(self):
+        """初始化平台特定的设置"""
+        self.os_name = platform.system()
+
+        # Windows特定设置
+        if self.os_name == "Windows":
+            try:
+                import ctypes
+                # 为Windows任务栏设置应用ID
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('yolo.vision.labeler.ide')
+            except:
+                pass
+
+        # macOS特定设置
+        elif self.os_name == "Darwin":
+            # 启用Retina显示支持
+            self.setAttribute(Qt.WA_TranslucentBackground)
+            self.setAttribute(Qt.WA_NoSystemBackground, False)
+            # 启用统一的工具栏样式
+            self.setUnifiedTitleAndToolBarOnMac(True)
+
+        # Linux特定设置
+        elif self.os_name == "Linux":
+            # 如果需要，添加Linux特定的设置
+            pass
+
+def init_qt_env():
+    # 启用高DPI缩放, 但是鼠标漂移问题依然未解决
+    # QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
+    # QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
+
+    signal.signal(signal.SIGINT, lambda *_: QApplication.quit())
+    print("init_qt_env finished..")
+
 
 if __name__ == "__main__":
-    print(f"PyTorch version: {torch.__version__}")
-    print(f"CUDA available: {torch.cuda.is_available()}")
+    print(f"PyTorch版本：{torch.__version__}")
+    print(f"CUDA可用：{torch.cuda.is_available()}")
+
+    init_qt_env()
 
     app = QApplication(sys.argv)
     DarkTheme.apply(app)
 
-    # Platform-specific font settings
+    # 平台特定的字体设置
     font = QFont()
     if platform.system() == "Windows":
         font.setFamily("Segoe UI")

@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import random
 import tempfile
 from pathlib import Path
@@ -9,14 +10,15 @@ import imagehash
 from ultralytics import YOLO
 from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout,
-    QWidget, QLabel, QPushButton, QListWidget,
-    QListWidgetItem, QMessageBox, QCheckBox,
+    QWidget, QLabel, QPushButton, QListWidget, QComboBox, QDialogButtonBox,
+    QListWidgetItem, QMessageBox, QCheckBox, QApplication,
     QDialog, QSizePolicy, QSplitter, QSizeGrip,
     QInputDialog, QSlider,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QPixmap, QImage, QColor
 
+from utils import get_label_txt
 
 class PlatformUtils:
     @staticmethod
@@ -68,18 +70,18 @@ class AutoLabelingThread(QThread):
                 self.progress_updated.emit(i, total, normalized_path)
 
                 try:
-                    # Пропускаем если уже есть разметка
+                    # 如果已存在标注，则跳过
                     txt_path = PlatformUtils.get_normalized_path(
                         os.path.splitext(img_path)[0] + '.txt'
                     )
                     if os.path.exists(txt_path):
                         continue
 
-                    # Загружаем изображение
+                    # 加载图像
                     img = Image.open(img_path)
                     img = img.resize((self.img_w, self.img_h))
 
-                    # Получаем предсказания
+                    # 获取预测
                     results = self.yolo_model.predict(
                         img,
                         verbose=False,
@@ -87,18 +89,18 @@ class AutoLabelingThread(QThread):
                         iou=self.iou
                     )
 
-                    # Сохраняем метки в YOLO формате
+                    # 以YOLO格式保存标签
                     with open(txt_path, 'w') as f:
                         for result in results:
                             for box in result.boxes:
-                                # Получаем координаты в YOLO формате
+                                # 获取YOLO格式的坐标
                                 x_center = float(box.xywhn[0][0])
                                 y_center = float(box.xywhn[0][1])
                                 width = float(box.xywhn[0][2])
                                 height = float(box.xywhn[0][3])
                                 class_id = int(box.cls)
 
-                                # Записываем в файл
+                                # 写入文件
                                 f.write(f"{class_id} {x_center} {y_center} {width} {height}\n")
 
                 except Exception as e:
@@ -119,7 +121,7 @@ class ClickableLabel(QLabel):
         super().__init__(parent)
         self.setCursor(Qt.PointingHandCursor)
         self._image_path = ""
-        self._click_enabled = True  # Флаг для предотвращения двойных кликов
+        self._click_enabled = True  # 用于防止双击的标志
 
     def setImagePath(self, path):
         self._image_path = path
@@ -127,23 +129,35 @@ class ClickableLabel(QLabel):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and self._click_enabled:
             self._click_enabled = False
-            QTimer.singleShot(300, lambda: setattr(self, '_click_enabled', True))  # Разблокировка через 300 мс
+            QTimer.singleShot(300, lambda: setattr(self, '_click_enabled', True))  # 300毫秒后解锁
             self.clicked.emit(self._image_path)
+
         super().mousePressEvent(event)
 
 
 class FullScreenImageDialog(QDialog):
-    labels_changed = pyqtSignal()  # Добавляем сигнал
+    labels_changed = pyqtSignal()  # 添加信号
     def __init__(
             self,
-            image_path, yolo_labels, colors, parent=None,
+            image_path, yolo_labels, all_colors, colors, parent=None, classes=None,
             yolo_model=None, yolo_img_w=640, yolo_img_h=640, yolo_conf=0.0, yolo_iou=0.0,
     ):
         super().__init__(parent)
+
+        # 设置对话框大小为父窗口的2/3
+        if parent:
+            parent_size = parent.size()
+            self.resize(parent_size.width() * 2 // 3, parent_size.height() * 2 // 3)
+
+        # 打标签需要用到的所有颜色, 与底色尽量相反
+        self.all_colors = all_colors
+        # 分类数组, 下标与打标软件下标对应
+        self.classes = classes
+
         self.utils = PlatformUtils()
         normalized_path = self.utils.get_normalized_path(image_path)
         self.setWindowFlags(self.windowFlags() | Qt.WindowCloseButtonHint)
-        self._is_closing = False  # Флаг для отслеживания закрытия
+        self._is_closing = False  # 用于跟踪关闭状态的标志
         self.label_visibility = []
         self.setWindowTitle(f"Image Viewer - {os.path.basename(image_path)}")
 
@@ -172,24 +186,26 @@ class FullScreenImageDialog(QDialog):
         self.current_label = None
         self.temp_rect = None
 
-        self.brightness_value = 100  # 100% - исходная яркость
-        self.original_img = None  # Будем хранить оригинальное изображение
-        self.current_img = None    # Текущее изображение с настройками
+        self.brightness_value = 100  # 100% - 原始亮度
+        self.original_img = None  # 存储原始图像
+        self.current_img = None    # 当前带调整的图像
 
         self.init_ui()
-        if not self.load_image():  # Если загрузка не удалась
-            self.close()  # Закрываем диалог
+        if not self.load_image():  # 如果加载失败
+            self.close()  # 关闭对话框
+        
+        QTimer.singleShot(100, self.update_image)
         self.update_labels_list()
 
     def init_ui(self):
-        # Главный контейнер с разделителем
+        # 主容器与分隔器
         self.splitter = QSplitter(Qt.Vertical)
         self.splitter.setHandleWidth(10)
 
-        # Верхняя часть - изображение с возможностью изменения размера
+        # 上半部分 - 可调整大小的图像
         # The top part is a resizable image
         self.image_container = QWidget()
-        self.image_container.setMinimumHeight(200)
+        self.image_container.setMinimumHeight(300)
         image_layout = QVBoxLayout(self.image_container)
         image_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -198,14 +214,15 @@ class FullScreenImageDialog(QDialog):
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         image_layout.addWidget(self.image_label)
 
-        # Нижняя часть - управление и список меток
+
+        # 下半部分 - 控制和标签列表
         # Bottom part - control and tag list
         self.controls_container = QWidget()
         self.controls_container.setMinimumHeight(150)
         controls_layout = QVBoxLayout(self.controls_container)
         controls_layout.setContentsMargins(5, 5, 5, 5)
 
-        # Панель управления с кнопками
+        # 控制面板与按钮
         # Control panel with buttons
         controls_panel = QWidget()
         panel_layout = QHBoxLayout(controls_panel)
@@ -219,10 +236,6 @@ class FullScreenImageDialog(QDialog):
         self.show_labels_check.setChecked(True)
         self.show_labels_check.stateChanged.connect(self.toggle_labels_visibility)
         panel_layout.addWidget(self.show_labels_check)
-
-        self.delete_selected_btn = QPushButton("Delete selected")
-        self.delete_selected_btn.clicked.connect(self.delete_selected_labels)
-        panel_layout.addWidget(self.delete_selected_btn)
 
         self.add_label_btn = QPushButton("Add markup")
         self.add_label_btn.clicked.connect(self.start_labeling_mode)
@@ -238,15 +251,15 @@ class FullScreenImageDialog(QDialog):
 
         controls_layout.addWidget(controls_panel)
 
-        # Добавим панель для регулировки яркости
+        # 添加亮度调节面板
         brightness_panel = QHBoxLayout()
 
         self.brightness_label = QLabel("Brightness:")
         brightness_panel.addWidget(self.brightness_label)
 
         self.brightness_slider = QSlider(Qt.Horizontal)
-        self.brightness_slider.setRange(50, 200)  # От 50% до 200%
-        self.brightness_slider.setValue(100)  # 100% - исходная яркость
+        self.brightness_slider.setRange(50, 200)  # 从50%到200%
+        self.brightness_slider.setValue(100)  # 100% - 原始亮度
         self.brightness_slider.setTickInterval(10)
         self.brightness_slider.setTickPosition(QSlider.TicksBelow)
         self.brightness_slider.valueChanged.connect(self.adjust_brightness)
@@ -255,51 +268,61 @@ class FullScreenImageDialog(QDialog):
         self.brightness_value_label = QLabel("100%")
         brightness_panel.addWidget(self.brightness_value_label)
 
-        # Добавим кнопку сброса
+        # 添加重置按钮
         reset_btn = QPushButton("Reset")
         reset_btn.clicked.connect(self.reset_brightness)
         brightness_panel.addWidget(reset_btn)
 
-        # Вставим панель яркости перед списком меток
+        # 在标签列表前插入亮度面板
         controls_layout.insertLayout(1, brightness_panel)
 
-        # Прокручиваемый список меток
-        # Scrollable list of labels
+        # 可滚动标签列表
         self.labels_list = QListWidget()
         self.labels_list.setSelectionMode(QListWidget.MultiSelection)
         controls_layout.addWidget(self.labels_list)
 
-        # Добавьте детали в сепаратор
-        # Add the parts to the separator
+        delete_layout = QHBoxLayout()
+        delete_layout.addStretch()
+
+        self.delete_selected_btn = QPushButton("Delete selected")
+        self.delete_selected_btn.clicked.connect(self.delete_selected_labels)
+        delete_layout.addWidget(self.delete_selected_btn)
+        
+        delete_layout.addStretch()
+        controls_layout.addLayout(delete_layout)
+
+        # 将部分添加到分隔器
         self.splitter.addWidget(self.image_container)
         self.splitter.addWidget(self.controls_container)
 
-        # Основной макет
-        # Main layout
+        self.splitter.setStretchFactor(0, 9)
+        self.splitter.setStretchFactor(1, 1)
+
+        # 主布局
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.addWidget(self.splitter)
 
-        # Добавляем SizeGrip для изменения размера окна
-        # Add a SizeGrip to resize the window
+        # 添加用于调整窗口大小的SizeGrip
         self.size_grip = QSizeGrip(self)
         main_layout.addWidget(self.size_grip, 0, Qt.AlignBottom | Qt.AlignRight)
 
         self.setLayout(main_layout)
 
-        # Настройки окна
-        # Window settings
-        self.setMinimumSize(600, 500)  # Минимальный размер окна
-        self.resize(800, 600)  # Начальный размер окна
+
+        self.setAttribute(Qt.WA_TranslucentBackground)  # 解决某些系统的绘制问题
+        self.setMouseTracking(True)  # 启用鼠标跟踪
+
 
     def close_and_save(self):
         if self._is_closing:
             return
         self._is_closing = True
 
-        # Сохраняем метки только если диалог еще не закрывается
+        # 仅在对话框尚未关闭时保存标签
         if hasattr(self, 'image_path') and hasattr(self, 'yolo_labels'):
-            label_path = os.path.splitext(self.image_path)[0] + '.txt'
+            label_path = get_label_txt(self.image_path)
+            print(f"[ close_and_save ] image_path: {self.image_path}, label_path: {label_path}")
             try:
                 with open(label_path, 'w') as file:
                     for tuple_item in self.yolo_labels:
@@ -312,26 +335,26 @@ class FullScreenImageDialog(QDialog):
         self.close()
 
     def resizeEvent(self, event):
-        """Обработчик изменения размера окна"""
+        """窗口大小改变事件处理程序"""
         super().resizeEvent(event)
         self.update_image()
 
     def toggle_expand_image(self, state):
-        """Переключает режим растягивания изображения"""
+        """切换图像拉伸模式"""
         self.expand_image = state == Qt.Checked
         self.update_image()
 
     def toggle_labels_visibility(self, state):
-        """Переключает видимость меток"""
+        """切换标签可见性"""
         self.show_labels = state == Qt.Checked
         self.update_image()
 
     def yolo_predict_old(self):
         if not os.path.exists(self.image_path):
-            QMessageBox.warning(self, "Ошибка", "Файл изображения не найден!")
+            QMessageBox.warning(self, "错误", "文件图像未找到！")
             return
         if self.yolo_model is None:
-            QMessageBox.warning(self, "Ошибка", "Файл Yolo модели не выбран!")
+            QMessageBox.warning(self, "错误", "未选择YOLO模型文件！")
             return
         img = Image.open(self.image_path)
         w, h = img.size
@@ -354,34 +377,33 @@ class FullScreenImageDialog(QDialog):
 
     def yolo_predict(self):
         if not os.path.exists(self.image_path):
-            QMessageBox.warning(self, "Ошибка", "Файл изображения не найден!")
+            QMessageBox.warning(self, "错误", "文件图像未找到！")
             return
         if self.yolo_model is None:
-            QMessageBox.warning(self, "Ошибка", "Файл Yolo модели не выбран!")
+            QMessageBox.warning(self, "错误", "未选择YOLO模型文件！")
             return
 
         try:
-            # Очищаем память перед предсказанием
+            # 在预测前清理内存
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-            # Открываем изображение
+            # 打开图像
             img = Image.open(self.image_path)
-            if max(img.size) > 2048:  # Ограничиваем максимальный размер
+            if max(img.size) > 2048:  # 限制最大尺寸
                 img.thumbnail((2048, 2048))
-            img = img.resize((self.yolo_img_w,self.yolo_img_h))
+            img = img.resize((self.yolo_img_w, self.yolo_img_h))
 
-            # Получаем предсказания с обработкой памяти
+            # 获取预测并处理内存
             with torch.no_grad():
                 pred_results = self.yolo_model.predict(img, verbose=False, conf=self.yolo_conf, iou=self.yolo_iou)
 
-            # Очищаем текущие метки
             # self.yolo_labels.clear()
             # self.colors.clear()
 
-            # Обрабатываем результаты
+            # 处理结果
             for result in pred_results:
                 for box in result.boxes:
-                    # Получаем координаты в формате YOLO (нормализованные)
+                    # 获取YOLO格式的坐标（归一化）
                     x_center = float(box.xywhn[0][0])
                     y_center = float(box.xywhn[0][1])
                     width = float(box.xywhn[0][2])
@@ -389,18 +411,18 @@ class FullScreenImageDialog(QDialog):
                     class_id = int(box.cls)
                     conf = str(float(box.conf))[:4]
 
-                    # Добавляем метку
+                    # 添加标签
                     self.yolo_labels.append((f"{class_id}::{conf}", x_center, y_center, width, height))
-                    self.colors.append((255, 0, 0))  # Красный цвет для предсказаний
+                    self.colors.append((255, 0, 0))  # 预测标签使用红色
 
-            # Обновляем список меток и изображение
+            # 更新标签列表和图像
             self.update_labels_list()
             self.update_image()
 
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка при предсказании: {str(e)}")
+            QMessageBox.critical(self, "错误", f"预测时出错：{str(e)}")
         finally:
-            # Очищаем память после использования
+            # 使用后清理内存
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     def delete_selected_labels(self):
@@ -424,11 +446,12 @@ class FullScreenImageDialog(QDialog):
                     if i < len(self.colors):
                         del self.colors[i]
 
+            self.update_labels_list()
             self.update_image()
-            self.load_image()
+
 
     def adjust_brightness(self, value):
-        """Изменяет яркость изображения"""
+        """调整图像亮度"""
         if not hasattr(self, 'original_img') or self.original_img is None:
             return
 
@@ -438,13 +461,13 @@ class FullScreenImageDialog(QDialog):
         if self.original_img is None:
             return
 
-        # Применяем изменение яркости
+        # 应用亮度调整
         enhancer = ImageEnhance.Brightness(self.original_img)
         self.current_img = enhancer.enhance(value / 100.0)
         self.update_image()
 
     def reset_brightness(self):
-        """Сбрасывает яркость к исходному значению"""
+        """将亮度重置为原始值"""
         self.brightness_slider.setValue(100)
         self.brightness_value_label.setText("100%")
         self.brightness_value = 100
@@ -453,62 +476,63 @@ class FullScreenImageDialog(QDialog):
 
     def load_image(self):
         if not os.path.exists(self.image_path):
-            QMessageBox.warning(self, "Ошибка", "Файл изображения не найден!")
+            QMessageBox.warning(self, "错误", "文件图像未找到！")
             return False
 
         try:
             with Image.open(self.utils.get_normalized_path(self.image_path)) as img:
                 self.original_img = img.convert("RGB")
-                self.current_img = self.original_img.copy()  # Копия для изменений
+                self.current_img = self.original_img.copy()  # 用于调整的副本
                 self._original_size = img.size
 
                 self.label_visibility = [True] * len(self.yolo_labels) if self.yolo_labels else []
 
-                # Устанавливаем начальное соотношение разделителя (70% изображение, 30% управление)
+                # 设置分隔器的初始比例（70%图像，30%控制）
                 total_height = self.height()
                 self.splitter.setSizes([int(total_height * 0.7), int(total_height * 0.3)])
 
                 self.update_image()
-
-                # Заполняем список меток
-                # self.labels_list.clear()
-                # self.label_visibility = []  # Список для хранения состояния видимости меток
-                for i, (label, color) in enumerate(zip(self.yolo_labels, self.colors)):
-                    # Создаем виджет для элемента списка
-                    item_widget = QWidget()
-                    item_layout = QHBoxLayout(item_widget)
-                    item_layout.setContentsMargins(5, 2, 5, 2)
-
-                    # Чекбокс видимости
-                    visibility_check = QCheckBox()
-                    visibility_check.setChecked(True)  # По умолчанию метка видима
-                    visibility_check.stateChanged.connect(
-                        lambda state, idx=i: self.toggle_single_label_visibility(idx, state))
-                    item_layout.addWidget(visibility_check)
-
-                    # Текст метки
-                    class_id = label[0]
-                    label_text = QLabel(f"■ Метка {i + 1}: Класс {class_id} (RGB: {color[0]}, {color[1]}, {color[2]})")
-                    label_text.setStyleSheet(f"color: rgb({color[0]}, {color[1]}, {color[2]});")
-                    item_layout.addWidget(label_text)
-                    item_layout.addStretch()
-
-                    # Создаем QListWidgetItem
-                    item = QListWidgetItem()
-                    item.setSizeHint(item_widget.sizeHint())
-
-                    # Добавляем в список
-                    self.labels_list.addItem(item)
-                    self.labels_list.setItemWidget(item, item_widget)
-
-                    # Сохраняем состояние видимости
-                    self.label_visibility.append(True)
                 return True
 
         except Exception as e:
-            print(f"Ошибка загрузки изображения {self.image_path}: {e}")
-            QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить изображение: {str(e)}")
+            print(f"无法加载图像: {self.image_path}: {e}")
+            QMessageBox.warning(self, "错误", f"无法加载图像：{str(e)}")
             return False
+
+    def widget_to_image_coords(self, wx, wy):
+        label_width = self.image_label.width()
+        label_height = self.image_label.height()
+        img_width, img_height = self.original_img.size
+
+        if self.expand_image:
+            # 拉伸模式：无边距，直接按比例缩放
+            displayed_width = label_width
+            displayed_height = label_height
+            left_margin = 0
+            top_margin = 0
+        else:
+            # 未拉伸模式：保持纵横比，计算边距
+            scale = min(label_width / float(img_width), label_height / float(img_height))
+            displayed_width = img_width * scale
+            displayed_height = img_height * scale
+            left_margin = (label_width - displayed_width) / 2
+            top_margin = (label_height - displayed_height) / 2
+
+        # 映射窗口坐标到图像坐标
+        px = wx - left_margin
+        py = wy - top_margin
+
+        if displayed_width > 0:
+            ix = px * (img_width / displayed_width)
+        else:
+            ix = 0  # 避免除零（理论上不会发生）
+
+        if displayed_height > 0:
+            iy = py * (img_height / displayed_height)
+        else:
+            iy = 0
+
+        return ix, iy
 
     def update_image(self):
         if not hasattr(self, 'original_img'):
@@ -518,54 +542,52 @@ class FullScreenImageDialog(QDialog):
             img = self.current_img.copy() if self.current_img else self.original_img.copy()
             draw = ImageDraw.Draw(img)
             img_width, img_height = img.size
-            label_width = self.image_label.width()
-            label_height = self.image_label.height()
 
-            # Коэффициенты масштабирования
-            scale_x = img_width / label_width
-            scale_y = img_height / label_height
-
-            # 1. Рисуем временный прямоугольник (между первым кликом и текущей позицией мыши)
+            # 1. 绘制临时矩形（从第一次点击到当前鼠标位置）
             if self.first_click and hasattr(self, 'temp_rect'):
                 p1, p2 = self.current_rect
+                ix1, iy1 = self.widget_to_image_coords(p1.x(), p1.y())
+                ix2, iy2 = self.widget_to_image_coords(p2.x(), p2.y())
 
-                # Конвертируем координаты в пространство изображения
-                x1 = p1.x() * scale_x
-                y1 = p1.y() * scale_y
-                x2 = p2.x() * scale_x
-                y2 = p2.y() * scale_y
+                x_min = min(ix1, ix2)
+                y_min = min(iy1, iy2)
+                x_max = max(ix1, ix2)
+                y_max = max(iy1, iy2)
 
-                # Убедимся, что x1 < x2 и y1 < y2
-                x1, x2 = sorted([x1, x2])
-                y1, y2 = sorted([y1, y2])
+                # 此时新增的label还未保存, 因此len+1
+                draw_color = (
+                    self.all_colors[ (len(self.yolo_labels)+1) % len(self.all_colors) ]
+                )
+                draw.rectangle([x_min, y_min, x_max, y_max], outline=draw_color, width=2)
 
-                # Рисуем полупрозрачный прямоугольник
-                draw.rectangle([x1, y1, x2, y2], outline="red", width=2)
-
-                # Добавляем временную подпись
+                # 添加临时标签
+                class_name = (self.classes[self.current_label] 
+                                if 0 <= self.current_label < len(self.classes) 
+                                else str(self.current_label))
+                
                 if self.current_label is not None:
                     try:
-                        font = ImageFont.load_default()
-                        draw.text((x1, y1), f"Class {self.current_label}", fill="red", font=font)
+                        font = ImageFont.truetype("arial.ttf", 20)
+                        draw.text((x_min, y_min), f"{class_name}", fill=draw_color, font=font)
                     except:
-                        draw.text((x1, y1), f"Class {self.current_label}", fill="red")
+                        draw.text((x_min, y_min), f"{class_name}", fill=draw_color)
 
-            # 2. Рисуем все сохраненные метки
+            # 2. 绘制所有保存的标签
             if self.show_labels and self.yolo_labels:
                 for i, (label, color) in enumerate(zip(self.yolo_labels, self.colors)):
-                    # Проверяем видимость метки
+                    # 检查标签可见性
                     if not self.label_visibility[i]:
                         continue
 
                     class_id, x_center, y_center, box_width, box_height = label
 
-                    # Конвертируем координаты YOLO в пиксели
+                    # 将YOLO坐标转换为像素
                     x_center_px = x_center * img_width
                     y_center_px = y_center * img_height
                     box_width_px = box_width * img_width
                     box_height_px = box_height * img_height
 
-                    # Вычисляем координаты углов
+                    # 计算矩形角点坐标
                     x1 = x_center_px - box_width_px / 2
                     y1 = y_center_px - box_height_px / 2
                     x2 = x_center_px + box_width_px / 2
@@ -574,12 +596,18 @@ class FullScreenImageDialog(QDialog):
                     # Draw rectangle with class-specific color
                     draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
 
-                    # Подпись класса
+                    # 获取class_name
+                    class_name = (self.classes[class_id] 
+                                if 0 <= class_id < len(self.classes) 
+                                else str(class_id))
+
+                    # 类别标签
                     try:
-                        font = ImageFont.load_default()
-                        draw.text((x1, y1), str(class_id), fill=color, font=font)
+                        font = ImageFont.truetype("arial.ttf", 20)
+                        draw.text((x1, y1), class_name, fill=color, font=font)
                     except:
-                        draw.text((x1, y1), str(class_id), fill=color)
+                        font = ImageFont.load_default()
+                        draw.text((x1, y1), class_name, fill=color, font=font)
 
             img = img.convert("RGBA")
             data = img.tobytes("raw", "RGBA")
@@ -587,7 +615,7 @@ class FullScreenImageDialog(QDialog):
 
             self._pixmap = QPixmap.fromImage(qim)
 
-            # Масштабируем согласно настройкам
+            # 根据设置进行缩放
             if self.expand_image:
                 self.image_label.setPixmap(self._pixmap.scaled(
                     self.image_label.size(),
@@ -595,6 +623,7 @@ class FullScreenImageDialog(QDialog):
                     Qt.SmoothTransformation
                 ))
             else:
+                # print("[ update_image ] image_label.size: ", self.image_label.size())
                 self.image_label.setPixmap(self._pixmap.scaled(
                     self.image_label.size(),
                     Qt.KeepAspectRatio,
@@ -602,10 +631,10 @@ class FullScreenImageDialog(QDialog):
                 ))
 
         except Exception as e:
-            print(f"Ошибка обновления изображения: {e}")
+            print(f"[update_image] exception: {e}")
 
     def toggle_single_label_visibility(self, label_idx, state):
-        """Переключает видимость отдельной метки"""
+        """切换单个标签的可见性"""
         self.label_visibility[label_idx] = state == Qt.Checked
         self.update_image()
 
@@ -613,41 +642,53 @@ class FullScreenImageDialog(QDialog):
     def update_labels_list(self):
         self.labels_list.clear()
         self.label_visibility = []
+        # print("[ update_labels_list ]test, labels: ", self.yolo_labels)
 
         for i, (label, color) in enumerate(zip(self.yolo_labels, self.colors)):
-            # Создаем виджет для элемента списка
+            # 为列表项创建控件
             item_widget = QWidget()
             item_layout = QHBoxLayout(item_widget)
             item_layout.setContentsMargins(5, 2, 5, 2)
 
-            # Чекбокс видимости
+            # 可见性复选框
             visibility_check = QCheckBox()
             visibility_check.setChecked(True)
             visibility_check.stateChanged.connect(lambda state, idx=i: self.toggle_single_label_visibility(idx, state))
             item_layout.addWidget(visibility_check)
 
-            # Текст метки
+            # 标签文本
             class_id = label[0]
-            label_text = QLabel(f"■ Метка {i + 1}: Класс {class_id} (RGB: {color[0]}, {color[1]}, {color[2]})")
+            class_name = (self.classes[class_id] 
+              if 0 <= class_id < len(self.classes) 
+              else "None")
+
+            label_text = QLabel(
+                f"■ 标签 {i + 1}: "
+                f"类别<b> {class_name}</b> | "
+                f"<span style='color:rgb({color[0]},{color[1]},{color[2]})'>■</span> "
+                f"RGB: {color[0]}, {color[1]}, {color[2]} | "
+                f"坐标: [{label[1]:.3f}, {label[2]:.3f}, {label[3]:.3f}, {label[4]:.3f}]"
+            )
+            
             label_text.setStyleSheet(f"color: rgb({color[0]}, {color[1]}, {color[2]});")
             item_layout.addWidget(label_text)
             item_layout.addStretch()
 
-            # Кнопка удаления
+            # 删除按钮
             delete_btn = QPushButton("×")
             delete_btn.setFixedSize(20, 20)
             delete_btn.clicked.connect(lambda _, idx=i: self.delete_single_label(idx))
             item_layout.addWidget(delete_btn)
 
-            # Создаем QListWidgetItem
+            # 创建QListWidgetItem
             item = QListWidgetItem()
             item.setSizeHint(item_widget.sizeHint())
 
-            # Добавляем в список
+            # 添加到列表
             self.labels_list.addItem(item)
             self.labels_list.setItemWidget(item, item_widget)
 
-            # Сохраняем состояние видимости
+            # 保存可见性状态
             self.label_visibility.append(True)
 
     def delete_single_label(self, label_idx):
@@ -658,44 +699,59 @@ class FullScreenImageDialog(QDialog):
             self.update_image()
 
     def start_labeling_mode(self):
-        """Активирует режим добавления разметки"""
-        class_id, ok = QInputDialog.getInt(
-            self,
-            "Новый объект",
-            "Введите номер класса:",
-            min=0, max=100, value=0
-        )
+        """激活添加标注模式(使用下拉框选择类别)"""
+        if not hasattr(self, 'classes') or not self.classes:
+            QMessageBox.warning(self, "错误", "未加载类别列表")
+            return
 
-        if ok:
+        # 创建下拉框对话框
+        dialog = QDialog(self)
+        dialog.setWindowTitle("选择类别")
+
+        layout = QVBoxLayout(dialog)
+        
+        # 创建下拉框
+        combo = QComboBox()
+        combo.addItems(self.classes)  # 添加所有类别名称
+        layout.addWidget(combo)
+        
+        # 创建按钮框
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        dialog.resize(300, 200)  # 直接调整对话框大小
+
+        # 显示对话框并等待用户选择
+        if dialog.exec_() == QDialog.Accepted:
             self.drawing_mode = True
-            self.current_label = class_id
+            self.current_label = combo.currentIndex()  # 获取选中项的下标
             self.setCursor(Qt.CrossCursor)
-            QMessageBox.information(
-                self,
-                "Создание разметки",
-                "Кликните в левый верхний угол объекта, затем в правый нижний"
-            )
+
 
     def mousePressEvent(self, event):
         if self.drawing_mode and event.button() == Qt.LeftButton:
-            # Фиксируем первую точку при нажатии
+            # 在点击时固定第一点
             self.first_click = event.pos()
-            self.current_rect = [self.first_click, self.first_click]  # Инициализируем прямоугольник
+            # print("[ mousePressEvent ] event.pos(): ", event.pos())
+
+            self.current_rect = [self.first_click, self.first_click]  # 初始化矩形
             self.update_image()
         else:
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self.drawing_mode and self.first_click:
-            # Обновляем вторую точку при движении с зажатой кнопкой
+            # 在鼠标移动时更新第二点
             self.current_rect[1] = event.pos()
-            self.update_image()  # Перерисовываем с обновленным прямоугольником
+            self.update_image()  # 使用更新的矩形重绘
         else:
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if self.drawing_mode and event.button() == Qt.LeftButton and self.first_click:
-            # Фиксируем вторую точку при отпускании
+            # 在释放时固定第二点
             second_point = event.pos()
             self.finish_labeling(second_point)
             self.first_click = None
@@ -705,46 +761,41 @@ class FullScreenImageDialog(QDialog):
             super().mouseReleaseEvent(event)
 
     def finish_labeling(self, second_point):
-        """Создает новую метку по двум точкам"""
         if not self.first_click:
             return
 
-        # Получаем координаты изображения
+        p1 = self.first_click
+        p2 = second_point
+
+        ix1, iy1 = self.widget_to_image_coords(p1.x(), p1.y())
+        ix2, iy2 = self.widget_to_image_coords(p2.x(), p2.y())
+
+        x_min = min(ix1, ix2)
+        y_min = min(iy1, iy2)
+        x_max = max(ix1, ix2)
+        y_max = max(iy1, iy2)
+
         img_width, img_height = self.original_img.size
-        label_width = self.image_label.width()
-        label_height = self.image_label.height()
+        x_center = ((x_min + x_max) / 2) / img_width
+        y_center = ((y_min + y_max) / 2) / img_height
+        box_width = (x_max - x_min) / img_width
+        box_height = (y_max - y_min) / img_height
 
-        # Получаем координаты прямоугольника
-        x1 = min(self.first_click.x(), second_point.x())
-        y1 = min(self.first_click.y(), second_point.y())
-        x2 = max(self.first_click.x(), second_point.x())
-        y2 = max(self.first_click.y(), second_point.y())
-
-        # Преобразуем в YOLO формат
-        x_center = ((x1 + x2) / 2) / label_width
-        y_center = ((y1 + y2) / 2) / label_height
-        width = (x2 - x1) / label_width
-        height = (y2 - y1) / label_height
-
-        # Добавляем новую метку
-        new_label = (self.current_label, x_center, y_center, width, height)
+        new_label = (self.current_label, x_center, y_center, box_width, box_height)
         self.yolo_labels.append(new_label)
 
-        # Генерируем цвет
         new_color = (
-            random.randint(50, 255),
-            random.randint(50, 255),
-            random.randint(50, 255)
+            self.all_colors[ len(self.yolo_labels) % len(self.all_colors) ]
         )
         self.colors.append(new_color)
 
-        # Обновляем интерфейс
         self.update_labels_list()
         self.drawing_mode = False
         self.setCursor(Qt.ArrowCursor)
+        self.update_image()
 
     def keyPressEvent(self, event):
-        """Отмена режима рисования по Esc"""
+        """通过Esc取消绘制模式"""
         if event.key() == Qt.Key_Escape and self.drawing_mode:
             self.drawing_mode = False
             self.first_click = None
@@ -752,13 +803,13 @@ class FullScreenImageDialog(QDialog):
             self.setCursor(Qt.ArrowCursor)
             self.update_image()
         elif event.key() == Qt.Key_Plus or event.key() == Qt.Key_Equal:
-            # Увеличиваем яркость на 5%
+            # 将亮度增加5%
             self.brightness_slider.setValue(min(self.brightness_value + 5, 200))
         elif event.key() == Qt.Key_Minus:
-            # Уменьшаем яркость на 5%
+            # 将亮度减少5%
             self.brightness_slider.setValue(max(self.brightness_value - 5, 50))
         elif event.key() == Qt.Key_0:
-            # Сброс яркости
+            # 重置亮度
             self.reset_brightness()
         elif event.key() == Qt.Key_Escape:
             self.close()
@@ -766,7 +817,7 @@ class FullScreenImageDialog(QDialog):
             super().keyPressEvent(event)
 
     def closeEvent(self, event):
-        """Сброс состояния при закрытии"""
+        """关闭时重置状态"""
         if self._pixmap:
             self._pixmap = None
         if self._is_closing:
@@ -779,9 +830,9 @@ class FullScreenImageDialog(QDialog):
 
 
 class ImageProcessingThread(QThread):
-    progress_updated = pyqtSignal(int, str)  # Добавляем текстовое сообщение
-    cluster_found = pyqtSignal(list)  # Новый сигнал для найденных кластеров
-    finished_clustering = pyqtSignal()  # Сигнал завершения
+    progress_updated = pyqtSignal(int, str)  # 添加文本消息
+    cluster_found = pyqtSignal(list)  # 新信号，用于找到的聚类
+    finished_clustering = pyqtSignal()  # 完成信号
 
     def __init__(self, image_folder, threshold, skip_single, hash_method):
         super().__init__()
@@ -794,14 +845,14 @@ class ImageProcessingThread(QThread):
         self.total_images = 0
 
     def run(self):
-        # Подсчет общего количества изображений
+        # 计算总图像数量
         self.total_images = sum(1 for _ in self._get_image_files())
         if self.total_images == 0:
             self.progress_updated.emit(0, "No images found")
             self.finished_clustering.emit()
             return
 
-        # Этап 1: Вычисление хэшей
+        # 阶段1：计算哈希值
         hashes = []
         for i, (img_path, hash_val) in enumerate(self._compute_hashes()):
             if self.canceled:
@@ -810,7 +861,7 @@ class ImageProcessingThread(QThread):
             progress = int((i + 1) / self.total_images * 50)
             self.progress_updated.emit(progress, f"Processing: {os.path.basename(img_path)}")
 
-        # Этап 2: Кластеризация
+        # 阶段2：聚类
         used_indices = set()
         total_processed = 0
 
@@ -830,7 +881,7 @@ class ImageProcessingThread(QThread):
                     used_indices.add(j)
 
             if not (self.skip_single and len(cluster) == 1):
-                self.cluster_found.emit(cluster)  # Отправляем найденный кластер
+                self.cluster_found.emit(cluster)  # 发送找到的聚类
 
             total_processed += len(cluster)
             progress = 50 + int(total_processed / self.total_images * 50)
@@ -839,7 +890,7 @@ class ImageProcessingThread(QThread):
         self.finished_clustering.emit()
 
     def _get_image_files(self):
-        """Генератор путей к изображениям"""
+        """图像路径生成器"""
         for root, _, files in os.walk(self.image_folder):
             for file in files:
                 if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
@@ -848,7 +899,7 @@ class ImageProcessingThread(QThread):
                     )
 
     def _compute_hashes(self):
-        """Генератор хэшей изображений"""
+        """图像哈希值生成器"""
         for img_path in self._get_image_files():
             try:
                 with Image.open(img_path) as img:

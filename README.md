@@ -1,206 +1,56 @@
-# YOLO Vision Labeler 🖼️🔍
+
+# YOLO Annotation Tool
+
+这是一个基于 Python 和 PyQt5 的 YOLO 标注工具，支持图片上传、编辑、裁剪和标注功能。用户可以通过拖曳或点击上传图片，进入标注模式后绘制矩形框，选择类别并输入描述，最终保存为 YOLO 格式的标注文件、裁剪后的图片和 Markdown 描述文件。
+
+## 功能
+
+- **图片上传**：支持拖曳或点击上传图片（.jpg 或 .png），上传后全屏显示。
+- **图片编辑**：
+  - 放大、缩小和按比例拖曳图片。
+  - 支持裁剪，裁剪框大小为 320x320、480x480、640x640，用户可拖动调整位置。
+- **标注模式**：
+  - 点击“标注 -> 开始标注”进入标注模式，禁用图片编辑功能。
+  - 提供文件名输入框、类别下拉框（从 `data.yaml` 读取）和描述文本框（支持富文本，保存为 Markdown）。
+  - 支持鼠标拖拽绘制矩形框，点击“重设”清除标注，点击“确定”保存。
+- **保存**：保存为三个文件：
+  - `filename.img`：裁剪后的图片。
+  - `filename.txt`：YOLO 格式标注（`class_id x y w h`）。
+  - `filename.md`：Markdown 格式的描述。
+- **配置文件**：从 `data.yaml` 读取类别信息，填充下拉框。
+
+## 依赖
+
+- Python 3.6+
+- 依赖库（见 `requirements.txt`）：
+  - PyQt5：GUI 框架
+  - pyyaml：解析 `data.yaml`
+  - html2text：富文本转 Markdown
 
 
-[![English](https://img.shields.io/badge/Language-English-blue)](README.md)
-[![Русский](https://img.shields.io/badge/Язык-Русский-red)](README.ru.md)
+## 安装
 
-
-### YOLO image clustering and markup tool
-
----
-
-## 🔹 Описание
-**YOLO Vision Labeler** — is a handy graphical application for:
-
-✅ **Clustering of similar images** (hash-based)
-
-✅ **Object markups in YOLO format** (rectangular bounding boxes)
-
-✅ **Removing duplicate and trash photos**
-
-Ideal for preparing datasets prior to training computer vision models.
-
----
-
-## ✨ Features
-
-### 1. Image clustering
-- Support for hashing algorithms: **Average Hash, PHash, DHash**
-- Setting similarity threshold (from 0 to 64)
-- Skip single images (not in clusters)
-
-### 2. Markup in YOLO format
-- **Drawing bounding boxes** (two clicks: upper left corner → lower right corner)
-- Specify **class number** for each object
-- Editing, deleting and hiding existing labels
-- Automatic saving to `.txt` (one file per image)
-
-### 3. Image management
-- View in **full screen mode** with zoom capability
-- Deleting selected photos (along with markup)
-- Support formats: **JPG, PNG, BMP, GIF**
-
-### 4. Cross-platform
-- Works on **Windows, macOS, Linux** (Debian/Ubuntu)
-
-Translated with DeepL.com (free version)
-
----
-
-## 🚀 Работа с YOLO моделью
-
-### ⚙️ Customising the model
-1. **Select Model** - specify the path to the `.pt` model file via the ‘Browse File’ button
-2. **Detection Parameters**:
-   - `Confidence` (1-100) - confidence threshold for detection
-   - `Image Width/Height` - input image size for the model
-   - `IOU Threshold` (1-100) - intersection threshold to suppress duplicate detections
-
-### 🔍 Использование модели
-| Function               |  Description                                                                 |
-|-----------------------|--------------------------------------------------------------------------|
-| Predict           | The ‘Predict YOLO model’ button starts detection on the current image    |
-| Automatic markup | The model automatically adds bounding boxes with classes               |
-| Visualisation          |  Detections are displayed with coloured boxes with class signatures              |
-
-### 🎨 Markup format
-The model stores data in YOLO format:
-
-```
-<class_id> <x_center> <y_center> <width> <height>
-```
-
-Where all coordinates are normalised relative to the image dimensions (0-1)
-
-### 💡 Performance Tips
-- For best quality, use models trained on your data
-- Adjust Confidence and IOU Threshold to your task
-- The image size should match the size on which the model was trained
-- Predictions can be edited manually in full screen mode
-
----
-
-## 🖼️ Auto-Labelling (Auto-Labelling)
-
-#### 🔍 YOLO Auto-Labelling
-
-The Auto-Labelling feature allows you to:
-- Automatically generate YOLO markup for unlabelled images
-- Use the loaded YOLO model to predict objects
-- Save results to `.txt` files in YOLO format
-
-**How to use:**
-1. Load the YOLO model through the ‘YOLO Model Settings’ menu
-2. Process the folder with the images (‘Process Images’)
-3. click ‘Auto Label with YOLO’ button after the processing is finished.
-4. Wait for the process to complete (progress is shown in the status bar)
-
-**Features:**
-- Works only with images that do not have corresponding `.txt` files
-- Supports confidence threshold and IOU threshold setting
-- Automatically detects CUDA availability for acceleration
-- Preserves original images without modification
-
----
-## 🌈 Adjusting the brightness of the image
-#### 💡 Adjusting brightness in viewing mode
-
-In full-screen viewing mode, tools are available to adjust brightness:
-
-**Controls:**
-- Brightness slider (50-200%)
-- Digital display of the current value
-- Reset button to reset the brightness to the original value
-
-**Hotkeys:**
-- `+` - Increase brightness by 5%
-- `-` - Decrease brightness by 5%
-- `0` - Reset brightness to 100%.
-
-**Features:**
-- Changes are applied only during playback
-- Does not affect original image files
-- Markup and bounding boxes remain visible at all brightness levels
-- Supports smooth changes with real-time previews
-
----
-
-## 🚀 Hotkeys
-
-### Cluster Navigation
-| Key | Action                           |
-|-----|-----------------------------------|
-| `W` | Previous cluster                |
-| `S` | Next cluster                 |
-| `X` | Keep one image, delete the others in the current cluster                 |
-
-### Работа с изображениями
-| Key  | Action                           |
-|---------|-----------------------------------|
-| `A`     | Invert all selection      |
-| `D`     |  Delete selected images    |
-| `P`     | Switch the current image   |
-
-### Навигация в кластере
-| Key  | Action                           |
-|---------|-----------------------------------|
-| `O`     | Next Image (→)         |
-| `L`     | Previous image (←)        |
-
-### Дополнительные функции
-| Key  | Action                           |
-|---------|-----------------------------------|
-| `Esc`   | Exit markup mode          |
-| `Enter` | Open the current image       |
-
-> 💡 Hint: The current image is highlighted with a blue frame
-
----
-
-## 🖥️ Download and Run (v0.0.1)
-
-### [MacOS Build](https://github.com/aliensowo/YOLO-Vision-Labeler/releases/download/untagged-8f24ee15334a0b0e5dca/YOLO_VisionLabelerMacOS.app.zip)
-
-### [MacOS_arm64 Build](https://github.com/aliensowo/YOLO-Vision-Labeler/releases/download/untagged-8f24ee15334a0b0e5dca/YOLO_VisionLabelerMacOS_arm64.app.zip)
-
-### [Win64 Build](https://github.com/aliensowo/YOLO-Vision-Labeler/releases/download/untagged-8f24ee15334a0b0e5dca/YOLO_VisionLabelerWIN64.exe)
-
----
-
-## 🖥️ Installing from source
-
-### 1. Requirements
-- Python 3.7+
-- Libs:
-
+Install the required packages using the provided `requirements.txt`:
 ```bash
 pip install -r requirements.txt
-```
-
-### 2. RUN
-
-```bash
 python main.py
 ```
 
+## Grok prompt
 
-### 3. EXE build (optionally)
-
-```bash
-pyinstaller --onefile --windowed main.py
-```
-
----
-
-## 📜 License
-MIT License — free use and modification.
-
----
-
-## 💡 Support
-Found a bug or have suggestions?
-Contact the author.
-
----
-
-🚀 With YOLO Vision Labeler, preparing datasets becomes easier!
+请实现一个界面, 用来实现yolo的标记工具, 具体需求如下:
+1. 使用python语言, qt框架, 注释使用英文, 回复使用中文
+2. 默认界面中心就是一个大框, 里面支持拖曳一个图片或者点击上传一张图片
+3. 如果点击或者上传图片成功后, 整个界面就变成了 这张图片的展示
+4. 菜单下边有 支持图片的 放大\缩小\按比例拖曳以及裁剪按钮, 默认裁剪矩形框为640*640大小, 还支持320*320, 480*480大小, 共三个选项, 用户可以挪动框来实现裁剪. 
+5. 菜单栏下边有一个按钮 "标记", 点击标记后, 则进入标记模式:
+    5.1. 图片不可再编辑, 也就是放大缩小/裁剪等菜单隐藏或灰化进入不可编辑模式
+    5.2. 有一个输入框, 名字是: 文件名. 用来输入保存的文件名
+    5.3. 有一个输入框, 用来选择类别, 具体类别信息需要读取 当前目录下的 data.yaml 文件里面的 names 数组, 具体参考附件: data.yaml(也就是初始化的时候需要读取该配置文件, 将类别数nc和类别信息读取出来, 这以供这里下拉选择). 选择后, 实际保存的是其id下标
+    5.4. 有一个文本框, 支持输入介绍信息, 框大概10-15行大小, 尽量支持富文本编辑, 但生成的格式是 markdown
+    5.5. 支持对图片进行标记, 也就是一个矩形框, 有一个重设\确定两个按钮, 重设则重新标记, 确定则保存具体信息
+    5.6 点击确定后, 则保存为3个文件, 假设文件名(前面输入框里面填写的)为 filename, 则3个文件分别为: filename.img(保存裁剪后的图片), filename.txt(标记文件, 格式见下面介绍), filename.md(介绍文件, 用来保存5.4中文本框的内容, 格式为markdown)
+6. filename.txt标记文件格式: classid, x, y, w, h, classid表示分类id, 也就是5.3选择的id下标(通过读取data.yaml的数组下标获得), x y w h 就是yolo标记常见风格,如: 4 0.49399038461538464 0.47836538461538464 0.10576923076923077 0.15264423076923078
+7. 请提供一份 requirements.txt 文件
+8. 请自行决定是否需要分为多个 .py 文件或目录
+8. 请提供一份markdown文件, 使用中文, 用来介绍各文件\目录功能, 以及安装等其他介绍信息

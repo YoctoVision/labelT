@@ -1,0 +1,24 @@
+# 默认目录结构: $pwd/dataset; $pwd/train.py; $pwd/...
+path: ./dataset
+
+# 如下路径是指相对于 上面 path 的路径, 也就是dataset目录下对应路径
+train: train/images
+val: valid/images
+test: test/images
+
+
+# number of class
+nc: 8
+
+# 请在这里列出详细的分类信息
+# 后面的注释表示它的 classid(从0开始)
+names: [
+  'Stain',          # 0: 脏点(表面附着污染物)
+  'Scratch',        # 1: 划痕(表面线性损伤)
+  'Foreign_Matter', # 2: 异物(夹杂杂质或灰尘)
+  'Press_Mark',     # 3: 打痕(异物挤压凹陷痕)
+  'Crack',          # 4: 破裂(材料断裂)
+  'Knot',           # 5: 结块(材料局部聚集)
+  'Bubble',         # 6: 气泡(内部气体包裹)
+  'Crease',         # 7: 折痕(折叠损伤)
+]
