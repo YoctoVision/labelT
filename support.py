@@ -11,7 +11,7 @@ from ultralytics import YOLO
 from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout,
     QWidget, QLabel, QPushButton, QListWidget, QComboBox, QDialogButtonBox,
-    QListWidgetItem, QMessageBox, QCheckBox, QApplication,
+    QListWidgetItem, QMessageBox, QCheckBox, QFileDialog,
     QDialog, QSizePolicy, QSplitter, QSizeGrip,
     QInputDialog, QSlider,
 )
@@ -144,6 +144,8 @@ class FullScreenImageDialog(QDialog):
     ):
         super().__init__(parent)
 
+        Image.MAX_IMAGE_PIXELS = 2000000000
+
         # 设置对话框大小为父窗口的2/3
         if parent:
             parent_size = parent.size()
@@ -181,7 +183,7 @@ class FullScreenImageDialog(QDialog):
         self.end_point = None
 
         # Labeling 2
-        self.drawing_mode = False
+        self.drawing_mode = ""
         self.first_click = None
         self.current_label = None
         self.temp_rect = None
@@ -190,6 +192,13 @@ class FullScreenImageDialog(QDialog):
         self.original_img = None  # 存储原始图像
         self.current_img = None    # 当前带调整的图像
 
+        # 添加裁剪缩放等功能
+        self.scale_factor = 1.0  # 当前缩放比例
+        self.crop_size = (640, 640)  # 默认裁剪尺寸
+        self.crop_rect = None  # 当前裁剪框位置
+        self.dragging_crop = False  # 是否正在拖动裁剪框
+        self.drag_offset = None  # 拖动偏移量
+
         self.init_ui()
         if not self.load_image():  # 如果加载失败
             self.close()  # 关闭对话框
@@ -197,13 +206,13 @@ class FullScreenImageDialog(QDialog):
         QTimer.singleShot(100, self.update_image)
         self.update_labels_list()
 
+
     def init_ui(self):
         # 主容器与分隔器
         self.splitter = QSplitter(Qt.Vertical)
         self.splitter.setHandleWidth(10)
 
         # 上半部分 - 可调整大小的图像
-        # The top part is a resizable image
         self.image_container = QWidget()
         self.image_container.setMinimumHeight(300)
         image_layout = QVBoxLayout(self.image_container)
@@ -214,67 +223,84 @@ class FullScreenImageDialog(QDialog):
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         image_layout.addWidget(self.image_label)
 
-
         # 下半部分 - 控制和标签列表
-        # Bottom part - control and tag list
         self.controls_container = QWidget()
         self.controls_container.setMinimumHeight(150)
         controls_layout = QVBoxLayout(self.controls_container)
         controls_layout.setContentsMargins(5, 5, 5, 5)
 
         # 控制面板与按钮
-        # Control panel with buttons
         controls_panel = QWidget()
         panel_layout = QHBoxLayout(controls_panel)
-        panel_layout.setContentsMargins(0, 0, 0, 5)
+        panel_layout.setContentsMargins(10, 5, 10, 5)
 
-        self.expand_check = QCheckBox("Stretch image")
-        self.expand_check.stateChanged.connect(self.toggle_expand_image)
-        panel_layout.addWidget(self.expand_check)
-
-        self.show_labels_check = QCheckBox("Show markup")
+        # 原有控件
+        self.show_labels_check = QCheckBox("显示标记")
         self.show_labels_check.setChecked(True)
         self.show_labels_check.stateChanged.connect(self.toggle_labels_visibility)
-        panel_layout.addWidget(self.show_labels_check)
+        panel_layout.addWidget(self.show_labels_check, 10)
 
-        self.add_label_btn = QPushButton("Add markup")
+        self.add_label_btn = QPushButton("新增标记")
         self.add_label_btn.clicked.connect(self.start_labeling_mode)
-        panel_layout.addWidget(self.add_label_btn)
+        panel_layout.addWidget(self.add_label_btn, 10)
 
-        self.make_yolo_btn = QPushButton("Predict yolo model")
-        self.make_yolo_btn.clicked.connect(self.yolo_predict)
-        panel_layout.addWidget(self.make_yolo_btn)
+        # 缩放控制
+        zoom_panel = QHBoxLayout()
+        zoom_panel.setContentsMargins(50, 5, 50, 5)
+        
+        # 缩小按钮
+        self.zoom_out_btn = QPushButton("-")
+        self.zoom_out_btn.clicked.connect(self.zoom_out)
+        zoom_panel.addWidget(self.zoom_out_btn)
+        
+        # 缩放滑块
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setRange(50, 200)
+        self.zoom_slider.setValue(100)
+        self.zoom_slider.valueChanged.connect(self.zoom_changed)
+        zoom_panel.addWidget(self.zoom_slider)
+        
+        # 放大按钮
+        self.zoom_in_btn = QPushButton("+")
+        self.zoom_in_btn.clicked.connect(self.zoom_in)
+        zoom_panel.addWidget(self.zoom_in_btn)
+        
+        # 将紧凑的缩放面板添加到主控制面板
+        # 先隐藏, 实现有问题...
+        # panel_layout.addLayout(zoom_panel, 40)
+        
+        # 裁剪控制 - 创建独立面板
+        crop_panel = QWidget()
+        crop_layout = QHBoxLayout(crop_panel)
+        crop_layout.setContentsMargins(30, 0, 30, 0)
 
-        close_btn = QPushButton("Save and close")
+        # 裁剪下拉框
+        self.crop_combo = QComboBox()
+        self.crop_combo.addItem("640x640", (640, 640))
+        self.crop_combo.addItem("480x480", (480, 480))
+        self.crop_combo.addItem("320x320", (320, 320))
+        self.crop_combo.currentIndexChanged.connect(self.crop_size_changed)
+        crop_layout.addWidget(self.crop_combo, 40)
+
+        # 裁剪标签
+        self.start_crop_btn = QPushButton("开始裁剪")
+        self.start_crop_btn.clicked.connect(self.apply_start_crop)
+        crop_layout.addWidget(self.start_crop_btn, 30)
+
+        # 应用裁剪按钮
+        self.apply_crop_btn = QPushButton("保存裁剪")
+        self.apply_crop_btn.clicked.connect(self.apply_crop)
+        crop_layout.addWidget(self.apply_crop_btn, 30)
+
+        # 将裁剪面板添加到主控制面板
+        panel_layout.addWidget(crop_panel, 30)
+
+        # 保存按钮
+        close_btn = QPushButton("保存并退出")
         close_btn.clicked.connect(self.close_and_save)
-        panel_layout.addWidget(close_btn)
+        panel_layout.addWidget(close_btn, 10)
 
         controls_layout.addWidget(controls_panel)
-
-        # 添加亮度调节面板
-        brightness_panel = QHBoxLayout()
-
-        self.brightness_label = QLabel("Brightness:")
-        brightness_panel.addWidget(self.brightness_label)
-
-        self.brightness_slider = QSlider(Qt.Horizontal)
-        self.brightness_slider.setRange(50, 200)  # 从50%到200%
-        self.brightness_slider.setValue(100)  # 100% - 原始亮度
-        self.brightness_slider.setTickInterval(10)
-        self.brightness_slider.setTickPosition(QSlider.TicksBelow)
-        self.brightness_slider.valueChanged.connect(self.adjust_brightness)
-        brightness_panel.addWidget(self.brightness_slider)
-
-        self.brightness_value_label = QLabel("100%")
-        brightness_panel.addWidget(self.brightness_value_label)
-
-        # 添加重置按钮
-        reset_btn = QPushButton("Reset")
-        reset_btn.clicked.connect(self.reset_brightness)
-        brightness_panel.addWidget(reset_btn)
-
-        # 在标签列表前插入亮度面板
-        controls_layout.insertLayout(1, brightness_panel)
 
         # 可滚动标签列表
         self.labels_list = QListWidget()
@@ -284,7 +310,7 @@ class FullScreenImageDialog(QDialog):
         delete_layout = QHBoxLayout()
         delete_layout.addStretch()
 
-        self.delete_selected_btn = QPushButton("Delete selected")
+        self.delete_selected_btn = QPushButton("删除选中")
         self.delete_selected_btn.clicked.connect(self.delete_selected_labels)
         delete_layout.addWidget(self.delete_selected_btn)
         
@@ -309,7 +335,6 @@ class FullScreenImageDialog(QDialog):
 
         self.setLayout(main_layout)
 
-
         self.setAttribute(Qt.WA_TranslucentBackground)  # 解决某些系统的绘制问题
         self.setMouseTracking(True)  # 启用鼠标跟踪
 
@@ -322,7 +347,7 @@ class FullScreenImageDialog(QDialog):
         # 仅在对话框尚未关闭时保存标签
         if hasattr(self, 'image_path') and hasattr(self, 'yolo_labels'):
             label_path = get_label_txt(self.image_path)
-            print(f"[ close_and_save ] image_path: {self.image_path}, label_path: {label_path}")
+            # print(f"[ close_and_save ] image_path: {self.image_path}, label_path: {label_path}")
             try:
                 with open(label_path, 'w') as file:
                     for tuple_item in self.yolo_labels:
@@ -595,6 +620,7 @@ class FullScreenImageDialog(QDialog):
 
                     # Draw rectangle with class-specific color
                     draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+                    # print(f"[ yolo_labels ] draw.rectangle: {[x1, y1, x2, y2]}")
 
                     # 获取class_name
                     class_name = (self.classes[class_id] 
@@ -609,13 +635,63 @@ class FullScreenImageDialog(QDialog):
                         font = ImageFont.load_default()
                         draw.text((x1, y1), class_name, fill=color, font=font)
 
+
+
+            # 应用zoom缩放按钮
+            if self.scale_factor != 1.0:
+                new_width = int(img.width * self.scale_factor)
+                new_height = int(img.height * self.scale_factor)
+                print(f"[scale_factor] new_width: {new_width}, new_height: {new_height}, self.scale_factor: {self.scale_factor}")
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+            # 绘制裁剪框（如果有）
+            if self.crop_rect:
+                try:
+                    # 计算矩形角点坐标
+                    x1 = self.crop_rect['x'] - self.crop_rect['width'] / 2
+                    y1 = self.crop_rect['y'] - self.crop_rect['height'] / 2
+                    x2 = self.crop_rect['x'] + self.crop_rect['width'] / 2
+                    y2 = self.crop_rect['y'] + self.crop_rect['height'] / 2
+    
+                    
+                    # 确保坐标值都是数字类型
+                    if all(isinstance(val, (int, float)) for val in [x1, y1, x2, y2]):
+                        # 绘制裁剪框
+                        draw.rectangle([x1, y1, x2, y2], outline="red", width=5)
+                        # print(f"[ crop_rect ] draw.rectangle: {[x1, y1, x2, y2]}")
+                        
+                        # 添加尺寸标签（黄色）
+                        text = f"{self.crop_rect['width']}x{self.crop_rect['height']}"
+                        font = ImageFont.load_default()
+                        try:
+                            # 尝试使用更大字体
+                            font = ImageFont.truetype("arial.ttf", 20)
+                        except:
+                            pass
+                            
+                        # 确保文本位置在图像范围内
+                        text_x = max(x1, 10)
+                        text_y = max(y1 - 25, 10)
+                        
+                        draw.text((text_x, text_y), text, fill="red", font=font)
+                    else:
+                        raise ValueError(f"无效坐标类型: {[x1, y1, x2, y2]}")
+                
+                except Exception as e:
+                    print(f"[绘制裁剪框出错] {e}")
+                    # 删除无效的裁剪框
+                    self.crop_rect = None
+
+
+            # 画图要放到最后
             img = img.convert("RGBA")
             data = img.tobytes("raw", "RGBA")
             qim = QImage(data, img.size[0], img.size[1], QImage.Format_RGBA8888)
 
             self._pixmap = QPixmap.fromImage(qim)
 
-            # 根据设置进行缩放
+            
+            # 根据设置进行拉伸
             if self.expand_image:
                 self.image_label.setPixmap(self._pixmap.scaled(
                     self.image_label.size(),
@@ -623,7 +699,6 @@ class FullScreenImageDialog(QDialog):
                     Qt.SmoothTransformation
                 ))
             else:
-                # print("[ update_image ] image_label.size: ", self.image_label.size())
                 self.image_label.setPixmap(self._pixmap.scaled(
                     self.image_label.size(),
                     Qt.KeepAspectRatio,
@@ -725,32 +800,67 @@ class FullScreenImageDialog(QDialog):
 
         # 显示对话框并等待用户选择
         if dialog.exec_() == QDialog.Accepted:
-            self.drawing_mode = True
+            self.drawing_mode = "label"
             self.current_label = combo.currentIndex()  # 获取选中项的下标
             self.setCursor(Qt.CrossCursor)
 
 
     def mousePressEvent(self, event):
-        if self.drawing_mode and event.button() == Qt.LeftButton:
+        if self.drawing_mode == "label" and event.button() == Qt.LeftButton:
             # 在点击时固定第一点
             self.first_click = event.pos()
             # print("[ mousePressEvent ] event.pos(): ", event.pos())
 
             self.current_rect = [self.first_click, self.first_click]  # 初始化矩形
             self.update_image()
+
+        elif self.drawing_mode == "crop" and event.button() == Qt.LeftButton and self.crop_rect:
+            self.dragging_crop = True  # 标记拖拽开始
+            self.drag_offset = self.widget_to_image_coords(event.x(), event.y())
+
         else:
             super().mousePressEvent(event)
 
+
     def mouseMoveEvent(self, event):
-        if self.drawing_mode and self.first_click:
+        if self.drawing_mode == "label" and self.first_click:
             # 在鼠标移动时更新第二点
             self.current_rect[1] = event.pos()
             self.update_image()  # 使用更新的矩形重绘
+
+        elif self.drawing_mode == "crop" and self.dragging_crop:
+            # 更新坐标
+            ix, iy = self.widget_to_image_coords(event.x(), event.y())
+
+            # 限制坐标在图像范围内
+            img_width, img_height = self.original_img.size
+            ix = max(0, min(ix, img_width))
+            iy = max(0, min(iy, img_height))
+            
+            # 计算偏移量
+            dx = ix - self.drag_offset[0]
+            dy = iy - self.drag_offset[1]
+
+
+            # 重置塔伤
+            self.drag_offset = ix, iy
+
+            # 更新裁剪框位置（平移整个矩形）
+            self.crop_rect = {
+                "x": self.crop_rect["x"] + dx,
+                "y": self.crop_rect["y"] + dy,
+                "width": self.crop_rect["width"],
+                "height": self.crop_rect["height"]
+            }
+            # print(f"self.crop_rect: {self.crop_rect}, dx: {dx}, dy: {dy}")
+
+            self.update_image()
+
         else:
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if self.drawing_mode and event.button() == Qt.LeftButton and self.first_click:
+        if self.drawing_mode == "label" and event.button() == Qt.LeftButton and self.first_click:
             # 在释放时固定第二点
             second_point = event.pos()
             self.finish_labeling(second_point)
@@ -790,17 +900,22 @@ class FullScreenImageDialog(QDialog):
         self.colors.append(new_color)
 
         self.update_labels_list()
-        self.drawing_mode = False
+        self.drawing_mode = ""
         self.setCursor(Qt.ArrowCursor)
         self.update_image()
 
     def keyPressEvent(self, event):
         """通过Esc取消绘制模式"""
-        if event.key() == Qt.Key_Escape and self.drawing_mode:
-            self.drawing_mode = False
+        if event.key() == Qt.Key_Escape and self.drawing_mode != "":
+            self.drawing_mode = ""
             self.first_click = None
             self.temp_rect = None
             self.setCursor(Qt.ArrowCursor)
+            self.crop_rect = None
+            
+            self.dragging_crop = False  # 是否正在拖动裁剪框
+            self.drag_offset = None  # 拖动偏移量
+
             self.update_image()
         elif event.key() == Qt.Key_Plus or event.key() == Qt.Key_Equal:
             # 将亮度增加5%
@@ -824,9 +939,162 @@ class FullScreenImageDialog(QDialog):
             event.accept()
             return
         self._is_closing = True
-        self.drawing_mode = False
+        self.drawing_mode = ""
         self.setCursor(Qt.ArrowCursor)
         super().closeEvent(event)
+
+
+
+    # 缩放功能实现
+    def zoom_in(self):
+        """放大图片"""
+        self.zoom_slider.setValue(min(self.zoom_slider.value() + 10, 200))
+
+    
+    def zoom_out(self):
+        """缩小图片"""
+        self.zoom_slider.setValue(max(self.zoom_slider.value() - 10, 50))
+
+    def zoom_changed(self, value):
+        """缩放滑块值变化处理"""
+        self.scale_factor = value / 100.0
+        self.update_image()
+
+
+    # 裁剪尺寸选择
+    def crop_size_changed(self, index):
+        """裁剪尺寸变化处理"""
+        self.crop_size = self.crop_combo.currentData()
+        self.crop_rect = None  # 重置裁剪框
+        self.drawing_mode = ""
+        self.update_image()
+
+    # 开始裁剪
+    def apply_start_crop(self):
+        """处理开始裁剪按钮点击事件"""
+        # 1. 获取当前选中的裁剪尺寸
+        self.current_crop_size = self.crop_combo.currentData()
+        
+        # 2. 计算图像中心位置
+        center_x = self.image_label.width() // 2
+        center_y = self.image_label.height() // 2
+
+        x, y = self.widget_to_image_coords(center_x, center_y)
+
+        # 3. 创建裁剪矩形框（居中显示）
+        self.crop_rect = {
+            "x": x,
+            "y": y,
+            "width": self.current_crop_size[0],
+            "height": self.current_crop_size[1]
+        }
+        
+        # 4. 切换到裁剪模式
+        self.drawing_mode = "crop"
+        self.setCursor(Qt.SizeAllCursor)  # 使用移动光标
+        
+        # 5. 更新界面显示
+        self.update_image()
+
+
+    # 应用裁剪
+    def apply_crop(self):
+        """应用裁剪操作"""
+        if not self.crop_rect:
+            QMessageBox.warning(self, "Warning", "没有可裁剪的区域")
+            return
+        
+        # 暂不考虑缩放
+        img_width, img_height = self.original_img.size
+
+
+        # 计算实际裁剪区域
+        x = int(self.crop_rect["x"])
+        y = int(self.crop_rect["y"])
+        width = int(self.crop_rect["width"])
+        height = int(self.crop_rect["height"])
+        
+
+        x1 = x - width/2
+        y1 = y - height/2
+
+        x2 = x + width/2
+        y2 = y + height/2
+        
+        # print(f"self.crop_rect: {self.crop_rect}, x1: {x1}, y1: {y1}, x2: {x2}, y2: {y2}")
+
+        if x1 < 0 or y1 < 0 or x1 > img_width or y1 > img_height or x2 < 0 or y2 < 0 or x2 > img_width or y2 > img_height or x1 >= x2 or y1 >= y2:
+            QMessageBox.warning(self, "Error", f"裁剪区域错误: x1: {x1}, y1: {y1}, x2: {x2}, y2: {y2}")
+            return
+
+        # 执行裁剪, 但不修改原图, 只是保存到新文件即可
+        # 如果需要对新文件进行标记, 自己重新load进来
+        cropped_img = self.original_img.crop([x1, y1, x2, y2])
+        
+        # 重置状态
+        self.crop_rect = None
+        self.drawing_mode = ""
+        # self.scale_factor = 1.0
+        # self.zoom_slider.setValue(100)
+        
+        # 更新图像, 实际上更新是无效的, 不修改实际图片
+        self.update_image()
+
+        # 保存图片
+        self.save_image_with_confirmation(cropped_img)  # 调用保存方法
+    
+
+    def save_image_with_confirmation(self, cropped_img):
+        """带确认机制的图片保存方法"""
+        base, ext = os.path.splitext(self.image_path)
+        cropped_image_path = f"{base}_cropped{ext}"
+
+        # 1. 创建保存对话框（默认使用原路径）
+        options = QFileDialog.Options()
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, 
+            "保存图片", 
+            cropped_image_path,
+            "图片文件 (*.png *.jpg *.jpeg);;所有文件 (*)",
+            options=options
+        )
+        
+        # 用户取消操作
+        if not file_path:
+            return
+        
+        # 2. 检查文件是否已存在 
+        # 不需要, 发现windows会自动检查..
+        # if os.path.exists(file_path):
+        #     # 创建覆盖确认对话框
+        #     reply = QMessageBox.question(
+        #         self,
+        #         "确认覆盖",
+        #         f"文件leafan {os.path.basename(file_path)} 已存在，是否覆盖?",
+        #         QMessageBox.Yes | QMessageBox.No,
+        #         QMessageBox.No
+        #     )
+            
+        #     if reply != QMessageBox.Yes:
+        #         return  # 用户取消覆盖
+        
+        # 3. 执行保存操作
+        try:
+            # 获取图片格式, 与原图一致
+            # 'PNG', 'BMP'格式无损
+            file_format = os.path.splitext(file_path)[1][1:].upper()
+            
+            # 特殊处理JPEG的质量参数, jpeg格式是有损的, 尽量不要保存为这类格式
+            save_kwargs = {'quality': 95} if file_format in ['JPG', 'JPEG'] else {}
+            
+            # 保存图片
+            cropped_img.save(file_path, format=file_format, **save_kwargs)
+            
+            # 提示保存成功
+            QMessageBox.information(self, "保存成功", f"图片已保存至: {file_path}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "保存失败", f"保存图片时出错: {str(e)}")
 
 
 class ImageProcessingThread(QThread):
