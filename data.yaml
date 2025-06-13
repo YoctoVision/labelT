@@ -32,6 +32,7 @@ names: [
     # a. 气泡(Bubble, 内部气体包裹)
     # b. 内部结块(Knot, 材料混合不均导致的局部聚集)
     # c. 内部异物(Embedded Object, 如纤维、金属屑等嵌入物)
+    # d. 损伤破裂(Crack, 破裂导致内部均已损坏)
   # ID: 2
   'Internal_Flaws',
 

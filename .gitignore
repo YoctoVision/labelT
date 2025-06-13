@@ -89,7 +89,5 @@ ehthumbs.db
 Thumbs.db
 ico/
 helper.py
-utils.py
-utils0.py
 process_dataset.py
 best.pt
