@@ -8,17 +8,44 @@ test: test/images
 
 
 # number of class
-nc: 8
+nc: 6
 
 # 请在这里列出详细的分类信息
-# 后面的注释表示它的 classid(从0开始)
 names: [
-  'Stain',          # 0: 脏点(表面附着污染物)
-  'Scratch',        # 1: 划痕(表面线性损伤)
-  'Foreign_Matter', # 2: 异物(夹杂杂质或灰尘)
-  'Press_Mark',     # 3: 打痕(异物挤压凹陷痕)
-  'Crack',          # 4: 破裂(材料断裂)
-  'Knot',           # 5: 结块(材料局部聚集)
-  'Bubble',         # 6: 气泡(内部气体包裹)
-  'Crease',         # 7: 折痕(折叠损伤)
+  # 表面异物类. 包含子类: 
+    # a. 表面灰尘(dust)
+    # b. 表面附着物(Foreign Material), 如油渍等
+    # c. 橘皮纹(Orange Peel)
+    # d. 结块(Knot, 材料局部聚集)等
+  # ID: 0
+  'Stain',
+
+  # 表面损伤类. 包含子类: 
+    # a. 划痕(Scratch, 表面线性损伤)
+    # b. 打痕(Dent, 异物挤压凹陷痕)
+    # c. 折痕(Fold Mark, 折叠损伤)
+    # d. 压痕(Pressure Mark, 非穿透性压伤)
+  # ID: 1
+  'Surface_Damage',
+
+  # 内部损伤类. 包含子类: 
+    # a. 气泡(Bubble, 内部气体包裹)
+    # b. 内部结块(Knot, 材料混合不均导致的局部聚集)
+    # c. 内部异物(Embedded Object, 如纤维、金属屑等嵌入物)
+  # ID: 2
+  'Internal_Flaws',
+
+  # 形变类. 包含子类: 
+    # 弯曲(Warp, 非预期的整体翘曲)
+    # 扭曲(Twist, 非平面变形)
+  # ID: 3
+  'Deformation',
+
+  # 片反, 指上下片贴反或角度错误
+  # ID: 4
+  'Flip',
+
+  # 浮膜, 指外层薄膜与偏光片主体之间的粘合失效, 导致薄膜局部翘起或脱落
+  # ID: 5
+  'Delamination'
 ]
