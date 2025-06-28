@@ -583,7 +583,7 @@ class FullScreenImageDialog(QDialog):
                 draw_color = (
                     self.all_colors[ (len(self.yolo_labels)+1) % len(self.all_colors) ]
                 )
-                draw.rectangle([x_min, y_min, x_max, y_max], outline=draw_color, width=2)
+                draw.rectangle([x_min, y_min, x_max, y_max], outline=draw_color, width=1)
 
                 # 添加临时标签
                 class_name = (self.classes[self.current_label] 
@@ -619,7 +619,7 @@ class FullScreenImageDialog(QDialog):
                     y2 = y_center_px + box_height_px / 2
 
                     # Draw rectangle with class-specific color
-                    draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+                    draw.rectangle([x1, y1, x2, y2], outline=color, width=1)
                     # print(f"[ yolo_labels ] draw.rectangle: {[x1, y1, x2, y2]}")
 
                     # 获取class_name
