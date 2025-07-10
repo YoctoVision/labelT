@@ -143,7 +143,7 @@ class FullScreenImageDialog(QDialog):
             yolo_model=None, yolo_img_w=640, yolo_img_h=640, yolo_conf=0.0, yolo_iou=0.0,
     ):
         super().__init__(parent)
-
+        self.all_colors = all_colors if all_colors else [(255, 0, 0), (0, 255, 0), (0, 0, 255)]  # 红、绿、蓝
         Image.MAX_IMAGE_PIXELS = 2000000000
 
         # 设置对话框大小为父窗口的2/3
@@ -397,7 +397,7 @@ class FullScreenImageDialog(QDialog):
         draw = ImageDraw.Draw(img)
         for box in pred_boxes:
             x_min, y_min, x_max, y_max, class_id = box
-            draw.rectangle([x_min, y_min, x_max, y_max], outline="red", width=5)
+            draw.rectangle([x_min, y_min, x_max, y_max], outline="red", width=2)
             draw.text((x_min, y_min), f"{class_id}", fill="red")
 
     def yolo_predict(self):
@@ -890,6 +890,14 @@ class FullScreenImageDialog(QDialog):
         y_center = ((y_min + y_max) / 2) / img_height
         box_width = (x_max - x_min) / img_width
         box_height = (y_max - y_min) / img_height
+
+        # 确保颜色列表非空
+        if not hasattr(self, 'all_colors') or len(self.all_colors) == 0:
+            self.all_colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]  # 默认颜色
+
+        # 计算新标签的颜色索引
+        color_index = len(self.yolo_labels) % len(self.all_colors)
+        new_color = self.all_colors[color_index]
 
         new_label = (self.current_label, x_center, y_center, box_width, box_height)
         self.yolo_labels.append(new_label)
