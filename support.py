@@ -276,9 +276,9 @@ class FullScreenImageDialog(QDialog):
 
         # 裁剪下拉框
         self.crop_combo = QComboBox()
-        self.crop_combo.addItem("640x640", (640, 640))
-        self.crop_combo.addItem("480x480", (480, 480))
         self.crop_combo.addItem("320x320", (320, 320))
+        self.crop_combo.addItem("640x640", (640, 640))
+        self.crop_combo.addItem("1280x1280", (1280, 1280))
         self.crop_combo.currentIndexChanged.connect(self.crop_size_changed)
         crop_layout.addWidget(self.crop_combo, 40)
 
@@ -1063,7 +1063,7 @@ class FullScreenImageDialog(QDialog):
             self, 
             "保存图片", 
             cropped_image_path,
-            "图片文件 (*.png *.jpg *.jpeg);;所有文件 (*)",
+            "图片文件 (*.png *.jpeg);;所有文件 (*)",
             options=options
         )
         
@@ -1102,7 +1102,11 @@ class FullScreenImageDialog(QDialog):
             QMessageBox.information(self, "保存成功", f"图片已保存至: {file_path}")
             
         except Exception as e:
-            QMessageBox.critical(self, "保存失败", f"保存图片时出错: {str(e)}")
+            QMessageBox.critical(self, "保存失败", 
+                f"错误详情:\n{str(e)}\n"
+                f"文件路径: {file_path}\n"
+                f"图像模式: {getattr(cropped_img, 'mode', 'N/A')}\n"
+                f"图像尺寸: {getattr(cropped_img, 'size', 'N/A')}")
 
 
 class ImageProcessingThread(QThread):
